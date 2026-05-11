@@ -15,6 +15,8 @@ from .const import DEFAULT_POLL_INTERVAL, DOMAIN
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
 
+    from .connect.client import QobuzConnectClient
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -34,6 +36,7 @@ class QobuzDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             update_interval=timedelta(seconds=update_interval),
         )
         self.api = api
+        self.connect_client: QobuzConnectClient | None = None
         # Exposed state — kept in sync by _async_update_data
         self.playlists: list[dict[str, Any]] = []
         self.current_playback: dict[str, Any] | None = None
@@ -41,6 +44,8 @@ class QobuzDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.favorite_tracks: list[dict[str, Any]] = []
         self.favorite_albums: list[dict[str, Any]] = []
         self.favorite_artists: list[dict[str, Any]] = []
+        # Cache for track metadata fetched via Connect track IDs
+        self._track_cache: dict[int, dict[str, Any]] = {}
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch latest data from Qobuz APIs."""
@@ -48,6 +53,10 @@ class QobuzDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Core polls on every interval
             self.playlists = await self.api.get_playlists()
             self.current_playback = await self.api.get_current_playback()
+
+            # If REST polling yielded no playback info, try Connect client state
+            if not self.current_playback and self.connect_client:
+                self.current_playback = await self._build_playback_from_connect()
 
             # User profile and favorites — fetched once per interval (cheap, cached by Qobuz)
             if not self.user_info:
@@ -70,3 +79,46 @@ class QobuzDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise ConfigEntryAuthFailed(str(err)) from err
         except QobuzAPIError as err:
             raise UpdateFailed(f"Error communicating with Qobuz API: {err}") from err
+
+    async def _build_playback_from_connect(self) -> dict[str, Any] | None:
+        """Build a playback dict from Connect WebSocket state if active."""
+        cc = self.connect_client
+        if not cc or not cc.connected:
+            return None
+        if not cc.is_playing and not cc.is_paused:
+            return None
+
+        track_id = cc.current_track_id
+        if not track_id:
+            return {
+                "is_playing": cc.is_playing,
+                "is_paused": cc.is_paused,
+                "source": "connect",
+                "device_name": cc.active_device_name,
+            }
+
+        track_info = await self._fetch_track_metadata(track_id)
+        return {
+            "is_playing": cc.is_playing,
+            "is_paused": cc.is_paused,
+            "track": track_info,
+            "position": cc.current_position,
+            "source": "connect",
+            "device_name": cc.active_device_name,
+        }
+
+    async def _fetch_track_metadata(self, track_id: int) -> dict[str, Any]:
+        """Fetch track metadata, using a simple cache to avoid redundant API calls."""
+        if track_id in self._track_cache:
+            return self._track_cache[track_id]
+        try:
+            track_info = await self.api.get_track_info(str(track_id))
+            self._track_cache[track_id] = track_info
+            # Keep cache bounded
+            if len(self._track_cache) > 50:
+                oldest = next(iter(self._track_cache))
+                del self._track_cache[oldest]
+            return track_info
+        except (QobuzAPIError, Exception) as err:  # noqa: BLE001
+            _LOGGER.debug("Could not fetch track info for %s: %s", track_id, err)
+            return {"id": track_id, "title": f"Track {track_id}"}

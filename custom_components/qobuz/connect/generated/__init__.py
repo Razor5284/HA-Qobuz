@@ -36,6 +36,7 @@ from qconnect_common_pb2 import (  # noqa: E402
     DeviceInfo,
     DeviceType,
     PlayingState,
+    RendererState,
 )
 from qconnect_envelope_pb2 import (  # noqa: E402
     Authenticate,
@@ -44,16 +45,24 @@ from qconnect_envelope_pb2 import (  # noqa: E402
     Subscribe,
 )
 from qconnect_payload_pb2 import (  # noqa: E402
+    CtrlSrvrAskForQueueState,
+    CtrlSrvrAskForRendererState,
     CtrlSrvrJoinSession,
     CtrlSrvrSetActiveRenderer,
     CtrlSrvrSetPlayerState,
     QConnectBatch,
     QConnectMessage,
     QConnectMessageType,
+    SrvrCtrlRendererStateUpdated,
+)
+from qconnect_queue_pb2 import (  # noqa: E402
+    SrvrCtrlQueueState,
 )
 
 __all__ = [
     "Authenticate",
+    "CtrlSrvrAskForQueueState",
+    "CtrlSrvrAskForRendererState",
     "CtrlSrvrJoinSession",
     "CtrlSrvrSetActiveRenderer",
     "CtrlSrvrSetPlayerState",
@@ -66,5 +75,8 @@ __all__ = [
     "QConnectBatch",
     "QConnectMessage",
     "QConnectMessageType",
+    "RendererState",
+    "SrvrCtrlQueueState",
+    "SrvrCtrlRendererStateUpdated",
     "Subscribe",
 ]

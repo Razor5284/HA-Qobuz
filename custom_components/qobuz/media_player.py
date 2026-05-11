@@ -120,6 +120,13 @@ class QobuzMediaPlayer(CoordinatorEntity[QobuzDataUpdateCoordinator], MediaPlaye
             return MediaPlayerState.PLAYING
         if playback.get("is_paused"):
             return MediaPlayerState.PAUSED
+        # Also check Connect client directly for real-time state
+        client = self._connect_client()
+        if client and client.connected:
+            if client.is_playing:
+                return MediaPlayerState.PLAYING
+            if client.is_paused:
+                return MediaPlayerState.PAUSED
         return MediaPlayerState.IDLE
 
     # ------------------------------------------------------------------

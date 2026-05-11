@@ -50,6 +50,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = QobuzDataUpdateCoordinator(hass, api, update_interval=poll_interval)
 
     connect_client = QobuzConnectClient(hass, api, entry.entry_id)
+    coordinator.connect_client = connect_client
     connect_client.start()
 
     await coordinator.async_config_entry_first_refresh()
