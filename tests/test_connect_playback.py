@@ -41,7 +41,7 @@ def _make_renderer_state_msg(playing_state: int, position: int = 0, duration: in
     return qmsg
 
 
-def _make_queue_state_msg(track_ids: list[int]):
+def _make_queue_state_msg(track_ids: list[int], queue_major: int = 1, queue_minor: int = 0):
     """Build a mock QConnectMessage with srvr_ctrl_queue_state."""
     import qconnect_payload_pb2
 
@@ -50,6 +50,8 @@ def _make_queue_state_msg(track_ids: list[int]):
     qmsg = qconnect_payload_pb2.QConnectMessage()
     qmsg.message_type = QConnectMessageType.MESSAGE_TYPE_SRVR_CTRL_QUEUE_STATE
     qs = qmsg.srvr_ctrl_queue_state
+    qs.queue_version.major = queue_major
+    qs.queue_version.minor = queue_minor
     for tid in track_ids:
         tr = qs.tracks.add()
         tr.track_id = tid
@@ -265,3 +267,167 @@ async def test_coordinator_connect_fallback_disconnected_returns_none(hass, mock
     await coordinator.async_refresh()
 
     assert coordinator.current_playback is None
+
+
+# ---------------------------------------------------------------------------
+# Connect client: next/previous track
+# ---------------------------------------------------------------------------
+
+
+async def test_connect_client_next_track(hass):
+    """media_next_track should advance queue index and send command."""
+    from custom_components.qobuz.connect.generated import PlayingState
+
+    client = _make_connect_client(hass)
+    client._ws = MagicMock()
+    client._ws.send = AsyncMock()
+
+    queue_msg = _make_queue_state_msg([100, 200, 300], queue_major=5, queue_minor=3)
+    client._handle_qmsg(queue_msg)
+
+    state_msg = _make_renderer_state_msg(PlayingState.PLAYING_STATE_PLAYING, queue_index=0)
+    client._handle_qmsg(state_msg)
+
+    result = await client.media_next_track()
+    assert result is True
+    assert client.current_queue_index == 1
+    client._ws.send.assert_called_once()
+
+
+async def test_connect_client_next_track_at_end(hass):
+    """media_next_track returns False at end of queue."""
+    from custom_components.qobuz.connect.generated import PlayingState
+
+    client = _make_connect_client(hass)
+    client._ws = MagicMock()
+    client._ws.send = AsyncMock()
+
+    queue_msg = _make_queue_state_msg([100, 200], queue_major=1, queue_minor=0)
+    client._handle_qmsg(queue_msg)
+
+    state_msg = _make_renderer_state_msg(PlayingState.PLAYING_STATE_PLAYING, queue_index=1)
+    client._handle_qmsg(state_msg)
+
+    result = await client.media_next_track()
+    assert result is False
+    assert client.current_queue_index == 1
+    client._ws.send.assert_not_called()
+
+
+async def test_connect_client_previous_track(hass):
+    """media_previous_track should go back in queue."""
+    from custom_components.qobuz.connect.generated import PlayingState
+
+    client = _make_connect_client(hass)
+    client._ws = MagicMock()
+    client._ws.send = AsyncMock()
+
+    queue_msg = _make_queue_state_msg([100, 200, 300], queue_major=2, queue_minor=1)
+    client._handle_qmsg(queue_msg)
+
+    state_msg = _make_renderer_state_msg(PlayingState.PLAYING_STATE_PLAYING, queue_index=2)
+    client._handle_qmsg(state_msg)
+
+    result = await client.media_previous_track()
+    assert result is True
+    assert client.current_queue_index == 1
+    client._ws.send.assert_called_once()
+
+
+async def test_connect_client_previous_track_at_start(hass):
+    """media_previous_track returns False at start of queue."""
+    from custom_components.qobuz.connect.generated import PlayingState
+
+    client = _make_connect_client(hass)
+    client._ws = MagicMock()
+    client._ws.send = AsyncMock()
+
+    queue_msg = _make_queue_state_msg([100, 200], queue_major=1, queue_minor=0)
+    client._handle_qmsg(queue_msg)
+
+    state_msg = _make_renderer_state_msg(PlayingState.PLAYING_STATE_PLAYING, queue_index=0)
+    client._handle_qmsg(state_msg)
+
+    result = await client.media_previous_track()
+    assert result is False
+    assert client.current_queue_index == 0
+    client._ws.send.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Connect client: device discovery
+# ---------------------------------------------------------------------------
+
+
+async def test_connect_client_device_added(hass):
+    """ADD_RENDERER message should populate the devices list."""
+    import qconnect_payload_pb2
+
+    from custom_components.qobuz.connect.generated import QConnectMessageType
+
+    client = _make_connect_client(hass)
+
+    qmsg = qconnect_payload_pb2.QConnectMessage()
+    qmsg.message_type = QConnectMessageType.MESSAGE_TYPE_SRVR_CTRL_ADD_RENDERER
+    add = qmsg.srvr_ctrl_add_renderer
+    add.renderer_id = 42
+    add.renderer.friendly_name = "Living Room Speaker"
+    add.renderer.model = "Sonos"
+
+    client._handle_qmsg(qmsg)
+
+    assert len(client.devices) == 1
+    assert client.devices[0]["name"] == "Living Room Speaker"
+    assert client.devices[0]["id"] == "42"
+
+
+async def test_connect_client_active_renderer(hass):
+    """ACTIVE_RENDERER_CHANGED should update active_device_name."""
+    import qconnect_payload_pb2
+
+    from custom_components.qobuz.connect.generated import QConnectMessageType
+
+    client = _make_connect_client(hass)
+
+    # Add a renderer first
+    add_msg = qconnect_payload_pb2.QConnectMessage()
+    add_msg.message_type = QConnectMessageType.MESSAGE_TYPE_SRVR_CTRL_ADD_RENDERER
+    add_msg.srvr_ctrl_add_renderer.renderer_id = 7
+    add_msg.srvr_ctrl_add_renderer.renderer.friendly_name = "Kitchen Speaker"
+    client._handle_qmsg(add_msg)
+
+    # Set it as active
+    active_msg = qconnect_payload_pb2.QConnectMessage()
+    active_msg.message_type = QConnectMessageType.MESSAGE_TYPE_SRVR_CTRL_ACTIVE_RENDERER_CHANGED
+    active_msg.srvr_ctrl_active_renderer_changed.renderer_id = 7
+    client._handle_qmsg(active_msg)
+
+    assert client.active_device_name == "Kitchen Speaker"
+
+
+async def test_connect_client_device_removed(hass):
+    """REMOVE_RENDERER message should remove from devices list."""
+    import qconnect_payload_pb2
+
+    from custom_components.qobuz.connect.generated import QConnectMessageType
+
+    client = _make_connect_client(hass)
+
+    # Add two renderers
+    for rid, name in [(1, "Speaker A"), (2, "Speaker B")]:
+        add_msg = qconnect_payload_pb2.QConnectMessage()
+        add_msg.message_type = QConnectMessageType.MESSAGE_TYPE_SRVR_CTRL_ADD_RENDERER
+        add_msg.srvr_ctrl_add_renderer.renderer_id = rid
+        add_msg.srvr_ctrl_add_renderer.renderer.friendly_name = name
+        client._handle_qmsg(add_msg)
+
+    assert len(client.devices) == 2
+
+    # Remove one
+    rem_msg = qconnect_payload_pb2.QConnectMessage()
+    rem_msg.message_type = QConnectMessageType.MESSAGE_TYPE_SRVR_CTRL_REMOVE_RENDERER
+    rem_msg.srvr_ctrl_remove_renderer.renderer_id = 1
+    client._handle_qmsg(rem_msg)
+
+    assert len(client.devices) == 1
+    assert client.devices[0]["name"] == "Speaker B"

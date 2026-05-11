@@ -51,6 +51,9 @@ class QobuzConnectClient:
         self.duration: int = 0  # seconds
         self.current_queue_index: int = 0
         self.queue_track_ids: list[int] = []
+        # Full queue state for track skipping
+        self._queue_tracks: list[dict[str, Any]] = []  # [{queue_item_id, track_id}]
+        self._queue_version: dict[str, int] | None = None  # {major, minor}
 
     @property
     def connected(self) -> bool:
@@ -203,11 +206,31 @@ class QobuzConnectClient:
     def _apply_queue_state(self, qs: Any) -> None:
         """Update local queue track list from SrvrCtrlQueueState."""
         self.queue_track_ids = [int(t.track_id) for t in qs.tracks if t.track_id]
+        self._queue_tracks = [
+            {"queue_item_id": int(t.queue_item_id), "track_id": int(t.track_id)}
+            for t in qs.tracks
+            if t.track_id
+        ]
+        if qs.queue_version:
+            self._queue_version = {
+                "major": int(qs.queue_version.major),
+                "minor": int(qs.queue_version.minor),
+            }
         self._notify_entity_update()
 
     def _apply_queue_tracks_loaded(self, qtl: Any) -> None:
         """Update local queue track list from SrvrCtrlQueueLoadTracks (server response)."""
         self.queue_track_ids = [int(t.track_id) for t in qtl.tracks if t.track_id]
+        self._queue_tracks = [
+            {"queue_item_id": int(t.queue_item_id), "track_id": int(t.track_id)}
+            for t in qtl.tracks
+            if t.track_id
+        ]
+        if qtl.queue_version:
+            self._queue_version = {
+                "major": int(qtl.queue_version.major),
+                "minor": int(qtl.queue_version.minor),
+            }
         self._notify_entity_update()
 
     async def _send_raw(self, data: bytes) -> None:
@@ -385,6 +408,65 @@ class QobuzConnectClient:
 
     async def media_pause(self) -> None:
         await self._send_player_state(playing=False, paused=True)
+
+    async def media_next_track(self) -> bool:
+        """Skip to the next track in the queue. Returns True if successful."""
+        next_idx = self.current_queue_index + 1
+        if next_idx >= len(self._queue_tracks):
+            _LOGGER.debug("Connect: no next track (at end of queue)")
+            return False
+        return await self._skip_to_queue_index(next_idx)
+
+    async def media_previous_track(self) -> bool:
+        """Skip to the previous track in the queue. Returns True if successful."""
+        prev_idx = self.current_queue_index - 1
+        if prev_idx < 0:
+            _LOGGER.debug("Connect: no previous track (at start of queue)")
+            return False
+        return await self._skip_to_queue_index(prev_idx)
+
+    async def _skip_to_queue_index(self, target_idx: int) -> bool:
+        """Set the player state to play the track at the given queue index."""
+        from .generated import (  # noqa: PLC0415
+            PlayingState,
+            QConnectMessage,
+            QConnectMessageType,
+        )
+
+        if not self._queue_tracks or not self._queue_version:
+            _LOGGER.debug("Connect: no queue data for track skip")
+            return False
+        if target_idx < 0 or target_idx >= len(self._queue_tracks):
+            return False
+
+        target_item = self._queue_tracks[target_idx]
+        queue_item_id = target_item["queue_item_id"]
+
+        qmsg = QConnectMessage()
+        qmsg.message_type = QConnectMessageType.MESSAGE_TYPE_CTRL_SRVR_SET_PLAYER_STATE
+        ctrl = qmsg.ctrl_srvr_set_player_state
+        ctrl.playing_state = PlayingState.PLAYING_STATE_PLAYING
+        ctrl.current_position = 0
+        qi = ctrl.current_queue_item
+        qi.id = queue_item_id
+        qv = qi.queue_version
+        qv.major = self._queue_version["major"]
+        qv.minor = self._queue_version["minor"]
+
+        now = protocol.now_ms()
+        batch_mid = self._msg_id
+        payload_mid = self._next_msg_id()
+        frame = protocol.encode_qconnect_command(
+            qmsg,
+            batch_messages_id=batch_mid,
+            payload_msg_id=payload_mid,
+            now_ms=now,
+        )
+        await self._send_raw(frame)
+        self.current_queue_index = target_idx
+        self._notify_entity_update()
+        _LOGGER.debug("Connect: skipping to queue index %s (item %s)", target_idx, queue_item_id)
+        return True
 
     async def transfer_playback(self, device_id: str) -> None:
         """Transfer to device id string (renderer numeric id)."""
