@@ -22,11 +22,12 @@ lint:
 	ruff check .
 
 test-api:
-	@if [ -z "$$QOBUZ_EMAIL" ] || [ -z "$$QOBUZ_PASSWORD" ]; then \
-		echo "Usage: QOBUZ_EMAIL=me@example.com QOBUZ_PASSWORD=secret make test-api"; \
+	@if [ -z "$$QOBUZ_TOKEN" ]; then \
+		echo "Usage: QOBUZ_TOKEN=your_token_here make test-api"; \
+		echo "Get your token from play.qobuz.com → F12 → Application → Local Storage → localuser → token"; \
 		exit 1; \
 	fi
-	python scripts/test_api.py "$$QOBUZ_EMAIL" "$$QOBUZ_PASSWORD"
+	python3 scripts/test_api.py "$$QOBUZ_TOKEN"
 
 # Copies integration files to a local HA config directory, then reminds you to restart.
 # Useful when HA runs on the same machine (e.g. in Docker with a volume mount, or HA OS VM).

@@ -28,12 +28,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     session = async_get_clientsession(hass)
     api = QobuzAPIClient(session)
 
-    # Rehydrate credentials stored during the config flow (password is never stored)
+    # Rehydrate credentials stored during the config flow (password is never stored).
+    # Always re-scrape the live app_id rather than trusting the stored one, since
+    # Qobuz rotates it and a stale app_id causes immediate 401s on all API calls.
     if "token" in entry.data and "user_id" in entry.data:
+        scraped_app_id = await api.scrape_app_id()
         api.set_auth(
             entry.data["token"],
             entry.data["user_id"],
-            entry.data.get("app_id"),
+            scraped_app_id or entry.data.get("app_id"),
         )
 
     coordinator = QobuzDataUpdateCoordinator(hass, api)

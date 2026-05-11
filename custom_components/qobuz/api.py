@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from aiohttp import ClientResponseError, ClientSession, ClientTimeout
 
 from .const import QOBUZ_API_BASE, QOBUZ_APP_ID
+
+_BUNDLE_URL_RE = re.compile(
+    r'<script src="(/resources/[\d.\-a-z]+/bundle\.js)"></script>'
+)
+_APP_ID_RE = re.compile(r'production:\{api:\{appId:"(?P<app_id>\d{9})"')
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -37,6 +43,44 @@ class QobuzAPIClient:
     # Auth
     # ------------------------------------------------------------------
 
+    async def scrape_app_id(self) -> str:
+        """Scrape the current app_id from the Qobuz web player bundle.
+
+        Qobuz rotates the app_id periodically.  This method fetches the login
+        page, extracts the bundle JS URL, then reads the app_id regex from the
+        minified JS.  Falls back to the compile-time constant on any failure.
+        """
+        try:
+            timeout = ClientTimeout(total=15)
+            async with self._session.get(
+                "https://play.qobuz.com/login", timeout=timeout
+            ) as resp:
+                login_html = await resp.text()
+
+            m = _BUNDLE_URL_RE.search(login_html)
+            if not m:
+                _LOGGER.debug("Could not locate bundle URL in Qobuz login page")
+                return QOBUZ_APP_ID
+
+            bundle_path = m.group(1)
+            async with self._session.get(
+                f"https://play.qobuz.com{bundle_path}", timeout=timeout
+            ) as resp:
+                bundle_js = await resp.text()
+
+            am = _APP_ID_RE.search(bundle_js)
+            if not am:
+                _LOGGER.debug("Could not find app_id in Qobuz bundle JS")
+                return QOBUZ_APP_ID
+
+            scraped = am.group("app_id")
+            _LOGGER.debug("Scraped Qobuz app_id: %s", scraped)
+            return scraped
+
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("app_id scraping failed (%s), using fallback", err)
+            return QOBUZ_APP_ID
+
     async def validate_token(
         self, token: str, app_id: str | None = None
     ) -> dict[str, Any]:
@@ -49,13 +93,16 @@ class QobuzAPIClient:
         Returns a dict with user_id and app_id on success, raises QobuzAuthError
         on failure.
         """
-        if app_id:
-            self._app_id = app_id
-
+        # Use caller-supplied app_id, or scrape the live value from the web player
+        self._app_id = app_id or await self.scrape_app_id()
         self._token = token
         self._user_id = None  # will be populated by the validation call
 
-        _LOGGER.debug("Validating Qobuz token (first %s...)", token[:8] if len(token) > 8 else "?")
+        _LOGGER.debug(
+            "Validating Qobuz token (first %s...) with app_id=%s",
+            token[:8] if len(token) > 8 else "?",
+            self._app_id,
+        )
 
         try:
             # /user/get validates the token and returns the user profile
