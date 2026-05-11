@@ -1,0 +1,21 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Qobuz",
+        "description": "Enter your Qobuz account credentials. Note: This integration uses unofficial API access.",
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid credentials or login failed. Check email/password and try again.",
+      "unknown": "Unexpected error. Check logs for details."
+    },
+    "abort": {
+      "already_configured": "Account is already configured."
+    }
+  }
+}

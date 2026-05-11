@@ -1,0 +1,10 @@
+# Ruff configuration aligned with Home Assistant style
+target-version = "py312"
+line-length = 88
+
+[lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "TCH"]
+ignore = ["E501", "B008"]  # line length handled by formatter, etc.
+
+[format]
+quote-style = "double"

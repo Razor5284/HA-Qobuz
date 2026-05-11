@@ -1,0 +1,10 @@
+{
+  "is_playing": true,
+  "track": {
+    "id": "67890",
+    "title": "Test Track",
+    "artist": {"name": "Test Artist"},
+    "album": {"title": "Test Album", "image": {"large": "https://example.com/art.jpg"}}
+  },
+  "device_name": "Living Room"
+}

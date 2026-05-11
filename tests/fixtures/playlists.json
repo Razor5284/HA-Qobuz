@@ -1,0 +1,10 @@
+{
+  "playlists": [
+    {
+      "id": "12345",
+      "name": "My Favorites",
+      "image": {"small": "https://example.com/cover.jpg"},
+      "tracks_count": 42
+    }
+  ]
+}
