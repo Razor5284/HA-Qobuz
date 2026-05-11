@@ -8,9 +8,9 @@ Compatible with latest Home Assistant (2025+ patterns).
 
 ## Features (comparable to SpotifyPlus where feasible)
 
-- Media player entity with play/pause/next/previous, browse media (playlists → tracks)
-- Rich metadata (title, artist, album, cover art)
-- Qobuz Connect: device/source selection (enumeration + transfer stubbed; full controller in active development per ADR)
+- Media player entity with browse media (playlists, favourites → tracks), signed stream URLs when the player bundle secret can be scraped
+- **Qobuz Connect (Phase 3)**: WebSocket controller session — discovers Connect renderers, transfer playback (`select_source` / service), play/pause via Connect when the session is active (protobuf protocol aligned with [qonductor](https://github.com/nickblt/qonductor))
+- REST polling for library + “now playing” via `/player/getState` where available
 - Config flow with re-auth
 - Diagnostics support
 
@@ -28,28 +28,25 @@ Compatible with latest Home Assistant (2025+ patterns).
 
 ## Configuration
 
-The integration uses a standard config flow:
-
-- Enter your Qobuz **email** and **password** (used only for initial token exchange; password is never stored).
-- Supports re-authentication on token expiry.
-
-After setup, a `media_player.qobuz` entity appears.
+You authenticate with a **browser session token** (not your password — Qobuz blocks automated login). After setup, a `media_player` and account/subscription sensors appear under one device.
 
 ### Options (via UI)
 
-- Polling interval (default 30s)
-- Preferred streaming quality (lossless / hi-res where available)
-- App ID / Secret overrides (advanced, for custom credentials from Qobuz)
+- **Polling interval** (default 30s)
+
+Advanced overrides (app id / secret) are not exposed in the options flow yet; the integration scrapes current credentials from the official web player bundle when possible.
 
 ## Qobuz Connect
 
-The integration aims for first-class Connect support:
+When `/qws/createToken` succeeds, the integration opens a regional **QConnect WebSocket**, authenticates with the issued JWT, joins as a **controller** (“Home Assistant”), and listens for renderer add/remove/active events. You can:
 
-- Pull available devices
-- Switch active stream ("transfer playback")
-- Transport controls on remote devices
+- See **sources** = discovered Connect devices (speaker/TV/Cast endpoints registered with Qobuz)
+- **Transfer playback** to a device (media player → Source, or `qobuz.transfer_playback`)
+- **Play / Pause** via Connect when the WS session is connected (otherwise state still follows REST polling)
 
-See [docs/adr/0001-qobuz-connect-approach.md](docs/adr/0001-qobuz-connect-approach.md) for the pure-Python decision and current limitations (renderer advertisement + best-effort controller).
+**Next/previous** track skipping is not mapped yet (queue-level QConnect messages); use the Qobuz app or the device UI if needed.
+
+See [docs/adr/0001-qobuz-connect-approach.md](docs/adr/0001-qobuz-connect-approach.md) and [docs/adr/0002-phase3-qconnect-controller.md](docs/adr/0002-phase3-qconnect-controller.md).
 
 ## Development & Maintenance
 
@@ -63,7 +60,7 @@ Inspired by the excellent [SpotifyPlus](https://github.com/thlucas1/homeassistan
 
 ## Changelog
 
-See GitHub releases for detailed changes. Initial release focuses on MVP + Connect scaffolding.
+See GitHub releases for detailed changes. **v0.9.0** adds the full QConnect WebSocket controller (device list, transfer, play/pause via Connect).
 
 ## Troubleshooting
 
@@ -83,9 +80,9 @@ This usually means HACS tried to fetch a non-existent branch or commit hash.
 
 After fixing, click "Redownload" in the integration card in HACS.
 
-### "No JWT for Connect; skipping WS" in logs
+### "No JWT for Connect" or Connect reconnect messages in logs
 
-This is normal during first setup or when no Connect JWT token has been obtained yet. It is logged at DEBUG level and can be ignored. Full Qobuz Connect controller functionality is under active development.
+If `/qws/createToken` fails, check that your session token is valid and review logs for API errors. When Connect starts correctly you should see **Qobuz Connect WebSocket connected** at INFO level.
 
 ## Development, Versioning & Releasing (for maintainers)
 

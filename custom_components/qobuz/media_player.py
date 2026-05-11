@@ -14,6 +14,7 @@ from homeassistant.components.media_player import (
     MediaType,
 )
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
@@ -69,6 +70,26 @@ class QobuzMediaPlayer(CoordinatorEntity[QobuzDataUpdateCoordinator], MediaPlaye
         super().__init__(coordinator)
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_player"
+
+    async def async_added_to_hass(self) -> None:
+        """Subscribe to Qobuz Connect device updates."""
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                f"{DOMAIN}_connect_{self._entry.entry_id}",
+                lambda *_args: self.schedule_update_ha_state(),
+            )
+        )
+
+    def _connect_client(self):  # noqa: ANN202
+        if not self.hass:
+            return None
+        return (
+            self.hass.data.get(DOMAIN, {})
+            .get(self._entry.entry_id, {})
+            .get("connect_client")
+        )
 
     # ------------------------------------------------------------------
     # Device info — groups entities under one device card
@@ -161,6 +182,10 @@ class QobuzMediaPlayer(CoordinatorEntity[QobuzDataUpdateCoordinator], MediaPlaye
             attrs["media_format"] = track.get("mime_type")
             attrs["bit_depth"] = track.get("bit_depth")
             attrs["sampling_rate"] = track.get("maximum_sampling_rate")
+        cc = self._connect_client()
+        if cc:
+            attrs["qobuz_connect_connected"] = cc.connected
+            attrs["qobuz_connect_devices"] = len(cc.devices)
         return attrs
 
     # ------------------------------------------------------------------
@@ -169,17 +194,16 @@ class QobuzMediaPlayer(CoordinatorEntity[QobuzDataUpdateCoordinator], MediaPlaye
 
     @property
     def source(self) -> str | None:
-        return (self.coordinator.current_playback or {}).get("device_name", "This device")
+        client = self._connect_client()
+        if client and client.active_device_name:
+            return client.active_device_name
+        return (self.coordinator.current_playback or {}).get("device_name")
 
     @property
     def source_list(self) -> list[str]:
-        connect = (
-            self.hass.data.get(DOMAIN, {})
-            .get(self._entry.entry_id, {})
-            .get("connect_client")
-        )
-        if connect and getattr(connect, "devices", None):
-            return [d.get("name", "Unknown") for d in connect.devices]
+        client = self._connect_client()
+        if client and getattr(client, "devices", None):
+            return [d.get("name", "Unknown") for d in client.devices]
         return ["This device"]
 
     # ------------------------------------------------------------------
@@ -187,20 +211,24 @@ class QobuzMediaPlayer(CoordinatorEntity[QobuzDataUpdateCoordinator], MediaPlaye
     # ------------------------------------------------------------------
 
     async def async_media_play(self) -> None:
-        """Resume playback — logs intent; real control requires Connect."""
-        _LOGGER.info("Qobuz play requested (state reflects web player)")
+        """Resume playback via Qobuz Connect when the WS session is active."""
+        client = self._connect_client()
+        if client and client.connected:
+            await client.media_play()
         await self.coordinator.async_request_refresh()
 
     async def async_media_pause(self) -> None:
-        _LOGGER.info("Qobuz pause requested")
+        client = self._connect_client()
+        if client and client.connected:
+            await client.media_pause()
         await self.coordinator.async_request_refresh()
 
     async def async_media_next_track(self) -> None:
-        _LOGGER.info("Qobuz next track")
+        _LOGGER.debug("Qobuz next track — use the Qobuz app or Connect device UI for skip")
         await self.coordinator.async_request_refresh()
 
     async def async_media_previous_track(self) -> None:
-        _LOGGER.info("Qobuz previous track")
+        _LOGGER.debug("Qobuz previous track — use the Qobuz app or Connect device UI")
         await self.coordinator.async_request_refresh()
 
     async def async_set_shuffle(self, shuffle: bool) -> None:
@@ -210,7 +238,14 @@ class QobuzMediaPlayer(CoordinatorEntity[QobuzDataUpdateCoordinator], MediaPlaye
         _LOGGER.info("Qobuz repeat: %s", repeat)
 
     async def async_select_source(self, source: str) -> None:
-        _LOGGER.info("Qobuz source: %s", source)
+        """Transfer playback to a Qobuz Connect renderer by display name."""
+        client = self._connect_client()
+        if not client:
+            return
+        for dev in client.devices:
+            if dev.get("name") == source:
+                await client.transfer_playback(dev["id"])
+                break
         await self.coordinator.async_request_refresh()
 
     # ------------------------------------------------------------------

@@ -15,9 +15,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.qobuz.const import DOMAIN
-
 pytest_plugins = "pytest_homeassistant_custom_component"
+
+DOMAIN = "qobuz"
 
 
 @pytest.fixture(autouse=True)
@@ -62,6 +62,13 @@ def mock_api():
     )
     api.get_track_url = AsyncMock(return_value=None)
     api.play_track = AsyncMock()
+    api.create_qws_token = AsyncMock(
+        return_value={
+            "jwt": "test-jwt",
+            "endpoint": "wss://test.invalid/ws",
+            "exp": None,
+        }
+    )
     return api
 
 

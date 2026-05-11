@@ -49,11 +49,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     poll_interval: int = entry.options.get(CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL)
     coordinator = QobuzDataUpdateCoordinator(hass, api, update_interval=poll_interval)
 
-    connect_client = QobuzConnectClient(hass, entry.data.get("jwt_qws"))
-    if entry.data.get("token"):
-        hass.async_create_background_task(
-            connect_client.connect(), "qobuz-connect-ws"
-        )
+    connect_client = QobuzConnectClient(hass, api, entry.entry_id)
+    connect_client.start()
 
     await coordinator.async_config_entry_first_refresh()
 
@@ -80,5 +77,7 @@ async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> Non
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
-        hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+        data = hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+        if data and (client := data.get("connect_client")):
+            await client.shutdown()
     return unload_ok

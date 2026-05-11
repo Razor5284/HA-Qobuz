@@ -12,7 +12,8 @@
   "issue_tracker": "https://github.com/Razor5284/HA-Qobuz/issues",
   "requirements": [
     "aiohttp>=3.10.0",
+    "protobuf>=5.26,<7",
     "websockets>=12.0"
   ],
-  "version": "0.8.0"
+  "version": "0.9.0"
 }

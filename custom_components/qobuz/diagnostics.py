@@ -28,6 +28,13 @@ async def async_get_config_entry_diagnostics(
         "coordinator_last_update_success": getattr(coordinator, "last_update_success", None),
     }
 
+    connect = data.get("connect_client")
+    if connect:
+        diagnostics["qobuz_connect"] = {
+            "connected": getattr(connect, "connected", False),
+            "device_count": len(getattr(connect, "devices", []) or []),
+        }
+
     if coordinator and hasattr(coordinator, "data"):
         diagnostics["data"] = async_redact_data(coordinator.data or {}, TO_REDACT)
 

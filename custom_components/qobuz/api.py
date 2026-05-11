@@ -11,7 +11,7 @@ from typing import Any
 
 from aiohttp import ClientResponseError, ClientSession, ClientTimeout
 
-from .const import DEFAULT_QUALITY, QOBUZ_API_BASE, QOBUZ_APP_ID
+from .const import DEFAULT_QUALITY, QOBUZ_API_BASE, QOBUZ_APP_ID, QOBUZ_WS_BASE
 
 _BUNDLE_URL_RE = re.compile(
     r'<script src="(/resources/[\d.\-a-z]+/bundle\.js)"></script>'
@@ -307,6 +307,40 @@ class QobuzAPIClient:
             "/catalog/search",
             params={"query": query, "limit": limit, "offset": 0},
         )
+
+    # ------------------------------------------------------------------
+    # Qobuz Connect (QWS) — WebSocket JWT
+    # ------------------------------------------------------------------
+
+    async def create_qws_token(self) -> dict[str, Any]:
+        """Create a short-lived JWT for QConnect WebSocket (`/qws/createToken`).
+
+        Returns a dict with at least:
+          - ``jwt``: bearer string for Authenticate envelope
+          - ``endpoint``: WebSocket URL (e.g. regional ``wss://qws-…/ws``)
+          - ``exp``: optional unix expiry seconds
+
+        Response shapes vary; we normalize nested ``jwt_qws`` objects from the API.
+        """
+        raw = await self._request("GET", "/qws/createToken")
+
+        nested = raw.get("jwt_qws")
+        if isinstance(nested, dict):
+            jwt = nested.get("jwt") or nested.get("token")
+            endpoint = nested.get("endpoint") or nested.get("url") or QOBUZ_WS_BASE
+            exp = nested.get("exp")
+        else:
+            jwt = raw.get("jwt") or raw.get("token")
+            endpoint = raw.get("endpoint") or raw.get("url") or QOBUZ_WS_BASE
+            exp = raw.get("exp")
+
+        if not jwt or not isinstance(jwt, str):
+            raise QobuzAPIError("createToken response missing jwt")
+
+        if not isinstance(endpoint, str):
+            endpoint = QOBUZ_WS_BASE
+
+        return {"jwt": jwt.strip(), "endpoint": endpoint.strip(), "exp": exp}
 
     # ------------------------------------------------------------------
     # Playback / streaming

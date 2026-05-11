@@ -39,8 +39,18 @@ async def async_setup_services(hass: HomeAssistant) -> None:
     async def _transfer_playback(call: ServiceCall) -> None:
         """Transfer current playback to a Connect device."""
         device_id = call.data["device_id"]
-        # In real: find connect_client and call transfer
-        _LOGGER.info("Transfer requested to device %s (stub)", device_id)
+        wanted = call.data.get("config_entry")
+        for entry_id, data in hass.data.get(DOMAIN, {}).items():
+            if wanted and entry_id != wanted:
+                continue
+            client = data.get("connect_client")
+            if client:
+                await client.transfer_playback(device_id)
+                _LOGGER.info(
+                    "Transfer requested to device %s (entry %s)", device_id, entry_id
+                )
+                return
+        _LOGGER.warning("No Qobuz connect client found for transfer_playback")
 
     # Guard against re-registration when async_setup_entry is called more than once
     # (e.g. during re-auth or after an options update).
