@@ -21,7 +21,8 @@ class QobuzConnectClient:
     def __init__(self, hass: HomeAssistant, jwt: str | None = None) -> None:
         self.hass = hass
         self._jwt = jwt
-        self._ws: websockets.WebSocketClientProtocol | None = None
+        # websockets >= 11 uses ClientConnection; Any covers older/newer versions
+        self._ws: Any = None
         self.devices: list[dict[str, Any]] = []
 
     async def connect(self) -> None:

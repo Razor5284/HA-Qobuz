@@ -82,11 +82,16 @@ class QobuzAPIClient:
 
     async def get_current_playback(self) -> dict[str, Any] | None:
         """Fetch current playback status if available via API."""
-        # Many unofficial clients poll /player or similar; placeholder
         try:
-            data = await self._request("GET", "/player/getState")
-            return data
-        except Exception:
+            return await self._request("GET", "/player/getState")
+        except QobuzAuthError:
+            raise
+        except QobuzAPIError as err:
+            # Endpoint may not exist on all account types; log and return None
+            _LOGGER.debug("Could not fetch playback state: %s", err)
+            return None
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Unexpected error fetching playback state: %s", err)
             return None
 
     async def play_track(self, track_id: str) -> None:
@@ -94,6 +99,11 @@ class QobuzAPIClient:
         await self._request("POST", "/player/play", json={"track_id": track_id})
 
     # Add more methods: search, album details, etc. as discovered
+
+    def set_auth(self, token: str, user_id: str) -> None:
+        """Restore a previously obtained auth token (e.g. from a config entry)."""
+        self._token = token
+        self._user_id = user_id
 
     def set_credentials(self, app_id: str | None = None, app_secret: str | None = None) -> None:
         """Allow runtime override of app credentials."""

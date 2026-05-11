@@ -28,11 +28,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     session = async_get_clientsession(hass)
     api = QobuzAPIClient(session)
 
-    # Rehydrate token if stored (from previous login)
-    # In real flow we store token/user_id in entry.data
-    if "token" in entry.data:
-        api._token = entry.data["token"]  # type: ignore[attr-defined]
-        api._user_id = entry.data.get("user_id")
+    # Rehydrate credentials stored during config flow (password is never stored)
+    if "token" in entry.data and "user_id" in entry.data:
+        api.set_auth(entry.data["token"], entry.data["user_id"])
 
     coordinator = QobuzDataUpdateCoordinator(hass, api)
 

@@ -42,9 +42,13 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         # In real: find connect_client and call transfer
         _LOGGER.info("Transfer requested to device %s (stub)", device_id)
 
-    hass.services.async_register(
-        DOMAIN, SERVICE_REFRESH_LIBRARY, _refresh_library, schema=REFRESH_SCHEMA
-    )
-    hass.services.async_register(
-        DOMAIN, SERVICE_TRANSFER_PLAYBACK, _transfer_playback, schema=TRANSFER_SCHEMA
-    )
+    # Guard against re-registration when async_setup_entry is called more than once
+    # (e.g. during re-auth or after an options update).
+    if not hass.services.has_service(DOMAIN, SERVICE_REFRESH_LIBRARY):
+        hass.services.async_register(
+            DOMAIN, SERVICE_REFRESH_LIBRARY, _refresh_library, schema=REFRESH_SCHEMA
+        )
+    if not hass.services.has_service(DOMAIN, SERVICE_TRANSFER_PLAYBACK):
+        hass.services.async_register(
+            DOMAIN, SERVICE_TRANSFER_PLAYBACK, _transfer_playback, schema=TRANSFER_SCHEMA
+        )
