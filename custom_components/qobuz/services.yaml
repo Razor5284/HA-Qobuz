@@ -1,0 +1,41 @@
+refresh_library:
+  name: Refresh Library
+  description: >-
+    Refresh the Qobuz library data (playlists, favourites) immediately
+    without waiting for the next poll interval.
+  fields:
+    config_entry:
+      name: Config Entry
+      description: >-
+        Optional config entry ID to refresh. If omitted, all Qobuz
+        entries are refreshed.
+      required: false
+      example: "abc123"
+      selector:
+        text:
+
+transfer_playback:
+  name: Transfer Playback
+  description: >-
+    Transfer the current Qobuz playback to a Connect device
+    (speaker, TV, etc.) by its device ID.
+  fields:
+    device_id:
+      name: Device ID
+      description: >-
+        The numeric renderer ID of the target Connect device.
+        Available device IDs are shown in the media player's
+        extra state attributes.
+      required: true
+      example: "42"
+      selector:
+        text:
+    config_entry:
+      name: Config Entry
+      description: >-
+        Optional config entry ID. If omitted, the first available
+        Qobuz Connect client is used.
+      required: false
+      example: "abc123"
+      selector:
+        text:

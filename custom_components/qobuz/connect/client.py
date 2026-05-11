@@ -44,6 +44,7 @@ class QobuzConnectClient:
         self._renderers: dict[int, dict[str, Any]] = {}
         self._active_renderer_id: int | None = None
         self._send_lock = asyncio.Lock()
+        self._consecutive_failures = 0
 
         # Playback state from Connect WebSocket
         self.playing_state: int = 0  # PlayingState enum value
@@ -486,15 +487,27 @@ class QobuzConnectClient:
             elif isinstance(message, str):
                 _LOGGER.debug("Unexpected WS text: %s", message[:120])
 
-    async def _one_connection(self) -> None:
+    async def _one_connection(self) -> bool:
+        """Attempt one Connect session. Returns True if it connected successfully."""
         try:
             tok = await self._api.create_qws_token()
         except QobuzAPIError as err:
-            _LOGGER.warning("Qobuz Connect: cannot create WS token: %s", err)
-            return
+            if self._consecutive_failures == 0:
+                _LOGGER.warning(
+                    "Qobuz Connect: cannot create WS token: %s "
+                    "(will keep retrying in the background; this is normal if "
+                    "your account/region does not support Qobuz Connect)",
+                    err,
+                )
+            else:
+                _LOGGER.debug("Qobuz Connect: createToken retry failed: %s", err)
+            self._consecutive_failures += 1
+            return False
         except Exception:  # noqa: BLE001
-            _LOGGER.exception("Qobuz Connect: createToken failed")
-            return
+            if self._consecutive_failures == 0:
+                _LOGGER.warning("Qobuz Connect: createToken failed unexpectedly")
+            self._consecutive_failures += 1
+            return False
 
         jwt = tok["jwt"]
         uri = tok["endpoint"]
@@ -507,10 +520,15 @@ class QobuzConnectClient:
                 max_size=None,
             )
         except Exception as err:  # noqa: BLE001
-            _LOGGER.warning("Qobuz Connect WebSocket failed: %s", err)
-            return
+            if self._consecutive_failures == 0:
+                _LOGGER.warning("Qobuz Connect WebSocket connection failed: %s", err)
+            else:
+                _LOGGER.debug("Qobuz Connect WebSocket retry failed: %s", err)
+            self._consecutive_failures += 1
+            return False
 
         self._connected = True
+        self._consecutive_failures = 0
         _LOGGER.info("Qobuz Connect WebSocket connected to %s", uri)
 
         try:
@@ -526,17 +544,20 @@ class QobuzConnectClient:
             _LOGGER.warning("Qobuz Connect session ended: %s", err)
         finally:
             await self._close_ws()
+        return True
 
     async def _run_loop(self) -> None:
-        backoff = 5
+        backoff = 30
         while not self._stop.is_set():
-            await self._one_connection()
+            connected = await self._one_connection()
             if self._stop.is_set():
                 break
+            if connected:
+                backoff = 5
             _LOGGER.debug("Qobuz Connect reconnecting in %ss", backoff)
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._stop.wait(), timeout=backoff)
-            backoff = min(backoff * 2, 120)
+            backoff = min(backoff * 2, 300)
 
     async def discover_devices(self) -> list[dict[str, Any]]:
         """Return Connect devices seen on the WebSocket."""
