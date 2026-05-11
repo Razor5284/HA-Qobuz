@@ -37,52 +37,42 @@ class QobuzAPIClient:
     # Auth
     # ------------------------------------------------------------------
 
-    async def login(self, email: str, password: str) -> dict[str, Any]:
-        """Authenticate with Qobuz and return session data.
+    async def validate_token(
+        self, token: str, app_id: str | None = None
+    ) -> dict[str, Any]:
+        """Validate a browser-extracted session token by making a real API call.
 
-        Uses the community-documented /user/login endpoint.  The app_id is
-        required by Qobuz for all API requests; the default value (QOBUZ_APP_ID)
-        is the publicly visible web-player app_id used by many open-source
-        Qobuz clients.
+        Qobuz's direct email/password login endpoint is reCAPTCHA-protected and
+        cannot be used by automated clients. Users must extract their session token
+        from play.qobuz.com browser Local Storage (localuser → token).
+
+        Returns a dict with user_id and app_id on success, raises QobuzAuthError
+        on failure.
         """
-        _LOGGER.debug("Attempting Qobuz login for %s", email)
-
-        url = f"{QOBUZ_API_BASE}/user/login"
-        params = {
-            "email": email,
-            "password": password,
-            "app_id": self._app_id,
-        }
-        headers = {_HEADER_APP_ID: self._app_id}
-
-        try:
-            timeout = ClientTimeout(total=15)
-            async with self._session.request(
-                "GET", url, params=params, headers=headers, timeout=timeout
-            ) as resp:
-                if resp.status in {400, 401, 403}:
-                    raise QobuzAuthError("Invalid email or password")
-                resp.raise_for_status()
-                data: dict[str, Any] = await resp.json()
-        except QobuzAuthError:
-            raise
-        except ClientResponseError as err:
-            raise QobuzAPIError(f"Login request failed: {err.status} {err.message}") from err
-        except Exception as err:  # noqa: BLE001
-            raise QobuzAPIError(f"Login request failed: {err}") from err
-
-        token: str = data.get("user_auth_token", "")
-        if not token:
-            _LOGGER.debug("Login response: %s", data)
-            raise QobuzAuthError("No auth token in Qobuz login response")
-
-        user_id: str = str(data.get("user", {}).get("id", ""))
+        if app_id:
+            self._app_id = app_id
 
         self._token = token
-        self._user_id = user_id
+        self._user_id = None  # will be populated by the validation call
 
-        _LOGGER.debug("Login successful for user_id=%s", user_id)
-        return {"user_id": user_id, "token": token, "app_id": self._app_id, "email": email}
+        _LOGGER.debug("Validating Qobuz token (first %s...)", token[:8] if len(token) > 8 else "?")
+
+        try:
+            # /user/get validates the token and returns the user profile
+            data = await self._request("GET", "/user/get")
+        except QobuzAuthError:
+            raise
+        except QobuzAPIError as err:
+            raise QobuzAuthError(f"Token validation failed: {err}") from err
+
+        user_id = str(data.get("id", "") or data.get("user", {}).get("id", ""))
+        if not user_id:
+            _LOGGER.debug("User profile response keys: %s", list(data.keys()))
+            raise QobuzAuthError("Token is valid but user profile returned no user_id")
+
+        self._user_id = user_id
+        _LOGGER.debug("Token valid for user_id=%s", user_id)
+        return {"user_id": user_id, "app_id": self._app_id}
 
     def set_auth(self, token: str, user_id: str, app_id: str | None = None) -> None:
         """Restore credentials from a previously obtained session (e.g. config entry)."""
@@ -107,17 +97,33 @@ class QobuzAPIClient:
     async def _request(
         self, method: str, endpoint: str, **kwargs: Any
     ) -> dict[str, Any]:
-        """Execute an authenticated API request."""
+        """Execute an authenticated API request.
+
+        Qobuz accepts credentials as both HTTP headers AND query parameters
+        depending on the API version and endpoint.  We send both to maximise
+        compatibility with whichever convention a given endpoint enforces.
+        """
         url = f"{QOBUZ_API_BASE}{endpoint}"
         headers: dict[str, str] = kwargs.pop("headers", {})
+        # Merge caller-supplied params so we don't overwrite them
+        params: dict[str, Any] = dict(kwargs.pop("params", {}))
+
+        # Credentials in headers
         headers[_HEADER_APP_ID] = self._app_id
         if self._token:
             headers[_HEADER_AUTH_TOKEN] = self._token
 
+        # Credentials also in query params — many Qobuz endpoints require this
+        params["app_id"] = self._app_id
+        if self._token:
+            params["user_auth_token"] = self._token
+
+        _LOGGER.debug("Qobuz request: %s %s params=%s", method, endpoint, {k: v for k, v in params.items() if k != "user_auth_token"})
+
         timeout = ClientTimeout(total=15)
         try:
             async with self._session.request(
-                method, url, headers=headers, timeout=timeout, **kwargs
+                method, url, headers=headers, params=params, timeout=timeout, **kwargs
             ) as resp:
                 if resp.status == 401:
                     raise QobuzAuthError("Token expired or invalid")

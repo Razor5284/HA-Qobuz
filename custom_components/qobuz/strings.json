@@ -3,16 +3,17 @@
     "step": {
       "user": {
         "title": "Connect to Qobuz",
-        "description": "Enter your Qobuz account credentials. Note: This integration uses unofficial API access.",
+        "description": "Qobuz requires a session token instead of your password.\n\n**How to get your token:**\n1. Open https://play.qobuz.com in your browser and log in.\n2. Press **F12** → **Application** tab → **Local Storage** → **https://play.qobuz.com**\n3. Click the **localuser** row and copy the **token** value.\n4. Paste it below.\n\nThe token typically lasts several days. You will be prompted to refresh it when it expires.",
         "data": {
-          "email": "Email",
-          "password": "Password"
+          "email": "Email (display label only)",
+          "user_auth_token": "User Auth Token (from browser Local Storage)",
+          "app_id": "App ID (leave blank to use default)"
         }
       }
     },
     "error": {
-      "invalid_auth": "Invalid credentials or login failed. Check email/password and try again.",
-      "unknown": "Unexpected error. Check logs for details."
+      "invalid_auth": "Token is invalid or expired. Please extract a fresh token from play.qobuz.com (see setup instructions above).",
+      "unknown": "Unexpected error. Check the Home Assistant logs for details."
     },
     "abort": {
       "already_configured": "Account is already configured.",
