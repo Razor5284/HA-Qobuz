@@ -30,12 +30,17 @@ def auto_enable_custom_integrations(enable_custom_integrations):
 
 @pytest.fixture
 def bypass_setup():
-    """Prevent HA from running async_setup_entry (for config flow tests).
+    """Prevent HA from running setup/teardown logic (for config flow tests).
 
     Config flow tests verify the flow itself; they shouldn't exercise the full
-    integration setup, which would require a live Qobuz account.
+    integration setup, which would require a live Qobuz account or extensive
+    mocking of the coordinator. Patching both directions keeps the HA test
+    harness happy during teardown too.
     """
-    with patch("custom_components.qobuz.async_setup_entry", return_value=True):
+    with (
+        patch("custom_components.qobuz.async_setup_entry", return_value=True),
+        patch("custom_components.qobuz.async_unload_entry", return_value=True),
+    ):
         yield
 
 

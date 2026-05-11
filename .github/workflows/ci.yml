@@ -11,7 +11,10 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.12", "3.13"]
+        # Home Assistant 2026 requires Python 3.13 as minimum.
+        # Testing only 3.13 avoids penalisation from older plugin versions
+        # (pytest-homeassistant-custom-component) that pip resolves for 3.12.
+        python-version: ["3.13"]
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python ${{ matrix.python-version }}
