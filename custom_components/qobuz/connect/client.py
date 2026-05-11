@@ -45,6 +45,16 @@ class QobuzConnectClient:
         self._active_renderer_id: int | None = None
         self._send_lock = asyncio.Lock()
 
+        # Playback state from Connect WebSocket
+        self.playing_state: int = 0  # PlayingState enum value
+        self.current_position: int = 0  # ms
+        self.duration: int = 0  # seconds
+        self.current_queue_index: int = 0
+        self.queue_track_ids: list[int] = []
+        # Full queue state for track skipping
+        self._queue_tracks: list[dict[str, Any]] = []  # [{queue_item_id, track_id}]
+        self._queue_version: dict[str, int] | None = None  # {major, minor}
+
     @property
     def connected(self) -> bool:
         return self._connected
@@ -55,6 +65,25 @@ class QobuzConnectClient:
             return None
         r = self._renderers.get(self._active_renderer_id)
         return r.get("name") if r else None
+
+    @property
+    def is_playing(self) -> bool:
+        from .generated import PlayingState  # noqa: PLC0415
+
+        return self.playing_state == PlayingState.PLAYING_STATE_PLAYING
+
+    @property
+    def is_paused(self) -> bool:
+        from .generated import PlayingState  # noqa: PLC0415
+
+        return self.playing_state == PlayingState.PLAYING_STATE_PAUSED
+
+    @property
+    def current_track_id(self) -> int | None:
+        """Return the Qobuz track_id currently playing from the queue."""
+        if self.queue_track_ids and 0 <= self.current_queue_index < len(self.queue_track_ids):
+            return self.queue_track_ids[self.current_queue_index]
+        return None
 
     def start(self) -> None:
         """Begin background connect/reconnect loop."""
@@ -131,8 +160,78 @@ class QobuzConnectClient:
                 self._active_renderer_id = int(ch.renderer_id)
                 self._notify_entity_update()
                 _LOGGER.debug("Connect: active renderer -> %s", self._active_renderer_id)
+        elif mt == QConnectMessageType.MESSAGE_TYPE_SRVR_CTRL_RENDERER_STATE_UPDATED:
+            rsu = qmsg.srvr_ctrl_renderer_state_updated
+            if rsu and rsu.state:
+                self._apply_renderer_state(rsu.state)
+                _LOGGER.debug(
+                    "Connect: renderer state updated — playing_state=%s pos=%s dur=%s idx=%s",
+                    self.playing_state,
+                    self.current_position,
+                    self.duration,
+                    self.current_queue_index,
+                )
         elif mt == QConnectMessageType.MESSAGE_TYPE_SRVR_CTRL_SESSION_STATE:
-            _LOGGER.debug("Connect: session state update")
+            ss = qmsg.srvr_ctrl_session_state
+            if ss:
+                self.current_queue_index = int(ss.track_index) if ss.track_index else 0
+                self._notify_entity_update()
+                _LOGGER.debug("Connect: session state — track_index=%s", ss.track_index)
+        elif mt == QConnectMessageType.MESSAGE_TYPE_SRVR_CTRL_QUEUE_STATE:
+            qs = qmsg.srvr_ctrl_queue_state
+            if qs:
+                self._apply_queue_state(qs)
+                _LOGGER.debug(
+                    "Connect: queue state — %d tracks", len(self.queue_track_ids)
+                )
+        elif mt == QConnectMessageType.MESSAGE_TYPE_SRVR_CTRL_QUEUE_TRACKS_LOADED:
+            qtl = qmsg.srvr_ctrl_queue_tracks_loaded
+            if qtl:
+                self._apply_queue_tracks_loaded(qtl)
+                _LOGGER.debug(
+                    "Connect: queue tracks loaded — %d tracks", len(self.queue_track_ids)
+                )
+        else:
+            _LOGGER.debug("Connect: unhandled message type %s", mt)
+
+    def _apply_renderer_state(self, state: Any) -> None:
+        """Update local playback state from a RendererState protobuf."""
+        self.playing_state = int(state.playing_state) if state.playing_state else 0
+        if state.current_position:
+            self.current_position = int(state.current_position.value)
+        self.duration = int(state.duration) if state.duration else 0
+        self.current_queue_index = int(state.current_queue_index) if state.current_queue_index else 0
+        self._notify_entity_update()
+
+    def _apply_queue_state(self, qs: Any) -> None:
+        """Update local queue track list from SrvrCtrlQueueState."""
+        self.queue_track_ids = [int(t.track_id) for t in qs.tracks if t.track_id]
+        self._queue_tracks = [
+            {"queue_item_id": int(t.queue_item_id), "track_id": int(t.track_id)}
+            for t in qs.tracks
+            if t.track_id
+        ]
+        if qs.queue_version:
+            self._queue_version = {
+                "major": int(qs.queue_version.major),
+                "minor": int(qs.queue_version.minor),
+            }
+        self._notify_entity_update()
+
+    def _apply_queue_tracks_loaded(self, qtl: Any) -> None:
+        """Update local queue track list from SrvrCtrlQueueLoadTracks (server response)."""
+        self.queue_track_ids = [int(t.track_id) for t in qtl.tracks if t.track_id]
+        self._queue_tracks = [
+            {"queue_item_id": int(t.queue_item_id), "track_id": int(t.track_id)}
+            for t in qtl.tracks
+            if t.track_id
+        ]
+        if qtl.queue_version:
+            self._queue_version = {
+                "major": int(qtl.queue_version.major),
+                "minor": int(qtl.queue_version.minor),
+            }
+        self._notify_entity_update()
 
     async def _send_raw(self, data: bytes) -> None:
         if self._ws is None:
@@ -189,6 +288,54 @@ class QobuzConnectClient:
         qmsg = QConnectMessage()
         qmsg.message_type = QConnectMessageType.MESSAGE_TYPE_CTRL_SRVR_JOIN_SESSION
         qmsg.ctrl_srvr_join_session = join
+
+        now = protocol.now_ms()
+        batch_mid = self._msg_id
+        payload_mid = self._next_msg_id()
+        frame = protocol.encode_qconnect_command(
+            qmsg,
+            batch_messages_id=batch_mid,
+            payload_msg_id=payload_mid,
+            now_ms=now,
+        )
+        await self._send_raw(frame)
+
+    async def _send_ask_for_renderer_state(self) -> None:
+        """Request current renderer state from the server after joining."""
+        from .generated import (  # noqa: PLC0415
+            CtrlSrvrAskForRendererState,
+            QConnectMessage,
+            QConnectMessageType,
+        )
+
+        qmsg = QConnectMessage()
+        qmsg.message_type = QConnectMessageType.MESSAGE_TYPE_CTRL_SRVR_ASK_FOR_RENDERER_STATE
+        ask = CtrlSrvrAskForRendererState()
+        qmsg.ctrl_srvr_ask_for_renderer_state = ask
+
+        now = protocol.now_ms()
+        batch_mid = self._msg_id
+        payload_mid = self._next_msg_id()
+        frame = protocol.encode_qconnect_command(
+            qmsg,
+            batch_messages_id=batch_mid,
+            payload_msg_id=payload_mid,
+            now_ms=now,
+        )
+        await self._send_raw(frame)
+
+    async def _send_ask_for_queue_state(self) -> None:
+        """Request current queue state from the server after joining."""
+        from .generated import (  # noqa: PLC0415
+            CtrlSrvrAskForQueueState,
+            QConnectMessage,
+            QConnectMessageType,
+        )
+
+        qmsg = QConnectMessage()
+        qmsg.message_type = QConnectMessageType.MESSAGE_TYPE_CTRL_SRVR_ASK_FOR_QUEUE_STATE
+        ask = CtrlSrvrAskForQueueState()
+        qmsg.ctrl_srvr_ask_for_queue_state = ask
 
         now = protocol.now_ms()
         batch_mid = self._msg_id
@@ -262,6 +409,65 @@ class QobuzConnectClient:
     async def media_pause(self) -> None:
         await self._send_player_state(playing=False, paused=True)
 
+    async def media_next_track(self) -> bool:
+        """Skip to the next track in the queue. Returns True if successful."""
+        next_idx = self.current_queue_index + 1
+        if next_idx >= len(self._queue_tracks):
+            _LOGGER.debug("Connect: no next track (at end of queue)")
+            return False
+        return await self._skip_to_queue_index(next_idx)
+
+    async def media_previous_track(self) -> bool:
+        """Skip to the previous track in the queue. Returns True if successful."""
+        prev_idx = self.current_queue_index - 1
+        if prev_idx < 0:
+            _LOGGER.debug("Connect: no previous track (at start of queue)")
+            return False
+        return await self._skip_to_queue_index(prev_idx)
+
+    async def _skip_to_queue_index(self, target_idx: int) -> bool:
+        """Set the player state to play the track at the given queue index."""
+        from .generated import (  # noqa: PLC0415
+            PlayingState,
+            QConnectMessage,
+            QConnectMessageType,
+        )
+
+        if not self._queue_tracks or not self._queue_version:
+            _LOGGER.debug("Connect: no queue data for track skip")
+            return False
+        if target_idx < 0 or target_idx >= len(self._queue_tracks):
+            return False
+
+        target_item = self._queue_tracks[target_idx]
+        queue_item_id = target_item["queue_item_id"]
+
+        qmsg = QConnectMessage()
+        qmsg.message_type = QConnectMessageType.MESSAGE_TYPE_CTRL_SRVR_SET_PLAYER_STATE
+        ctrl = qmsg.ctrl_srvr_set_player_state
+        ctrl.playing_state = PlayingState.PLAYING_STATE_PLAYING
+        ctrl.current_position = 0
+        qi = ctrl.current_queue_item
+        qi.id = queue_item_id
+        qv = qi.queue_version
+        qv.major = self._queue_version["major"]
+        qv.minor = self._queue_version["minor"]
+
+        now = protocol.now_ms()
+        batch_mid = self._msg_id
+        payload_mid = self._next_msg_id()
+        frame = protocol.encode_qconnect_command(
+            qmsg,
+            batch_messages_id=batch_mid,
+            payload_msg_id=payload_mid,
+            now_ms=now,
+        )
+        await self._send_raw(frame)
+        self.current_queue_index = target_idx
+        self._notify_entity_update()
+        _LOGGER.debug("Connect: skipping to queue index %s (item %s)", target_idx, queue_item_id)
+        return True
+
     async def transfer_playback(self, device_id: str) -> None:
         """Transfer to device id string (renderer numeric id)."""
         try:
@@ -311,6 +517,8 @@ class QobuzConnectClient:
             await self._send_authenticate(jwt)
             await self._send_subscribe()
             await self._send_join_controller()
+            await self._send_ask_for_renderer_state()
+            await self._send_ask_for_queue_state()
             await self._receive_loop()
         except asyncio.CancelledError:
             raise

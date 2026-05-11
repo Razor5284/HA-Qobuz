@@ -73,6 +73,29 @@ async def test_state_paused(hass):
     assert p.state == MediaPlayerState.PAUSED
 
 
+async def test_state_playing_via_connect_fallback(hass):
+    """When REST returns no playback but Connect reports playing, state is PLAYING."""
+    player = _make_player(playback=None, hass=hass)
+    # Simulate connect client being available via hass.data
+    cc = MagicMock()
+    cc.connected = True
+    cc.is_playing = True
+    cc.is_paused = False
+    hass.data = {"qobuz": {"test_entry": {"connect_client": cc}}}
+    assert player.state == MediaPlayerState.PLAYING
+
+
+async def test_state_paused_via_connect_fallback(hass):
+    """When REST returns no playback but Connect reports paused, state is PAUSED."""
+    player = _make_player(playback=None, hass=hass)
+    cc = MagicMock()
+    cc.connected = True
+    cc.is_playing = False
+    cc.is_paused = True
+    hass.data = {"qobuz": {"test_entry": {"connect_client": cc}}}
+    assert player.state == MediaPlayerState.PAUSED
+
+
 # ---------------------------------------------------------------------------
 # Metadata
 # ---------------------------------------------------------------------------

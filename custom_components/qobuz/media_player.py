@@ -120,6 +120,13 @@ class QobuzMediaPlayer(CoordinatorEntity[QobuzDataUpdateCoordinator], MediaPlaye
             return MediaPlayerState.PLAYING
         if playback.get("is_paused"):
             return MediaPlayerState.PAUSED
+        # Also check Connect client directly for real-time state
+        client = self._connect_client()
+        if client and client.connected:
+            if client.is_playing:
+                return MediaPlayerState.PLAYING
+            if client.is_paused:
+                return MediaPlayerState.PAUSED
         return MediaPlayerState.IDLE
 
     # ------------------------------------------------------------------
@@ -224,11 +231,17 @@ class QobuzMediaPlayer(CoordinatorEntity[QobuzDataUpdateCoordinator], MediaPlaye
         await self.coordinator.async_request_refresh()
 
     async def async_media_next_track(self) -> None:
-        _LOGGER.debug("Qobuz next track — use the Qobuz app or Connect device UI for skip")
+        """Skip to the next track via Qobuz Connect."""
+        client = self._connect_client()
+        if client and client.connected:
+            await client.media_next_track()
         await self.coordinator.async_request_refresh()
 
     async def async_media_previous_track(self) -> None:
-        _LOGGER.debug("Qobuz previous track — use the Qobuz app or Connect device UI")
+        """Skip to the previous track via Qobuz Connect."""
+        client = self._connect_client()
+        if client and client.connected:
+            await client.media_previous_track()
         await self.coordinator.async_request_refresh()
 
     async def async_set_shuffle(self, shuffle: bool) -> None:
