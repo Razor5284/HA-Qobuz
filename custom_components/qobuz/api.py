@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
-from aiohttp import ClientSession, ClientTimeout
+from aiohttp import ClientResponseError, ClientSession, ClientTimeout
 
-from .const import QOBUZ_API_BASE
+from .const import QOBUZ_API_BASE, QOBUZ_APP_ID
 
 _LOGGER = logging.getLogger(__name__)
+
+# Qobuz expects these specific headers for auth; NOT standard Bearer.
+_HEADER_APP_ID = "X-App-Id"
+_HEADER_AUTH_TOKEN = "X-User-Auth-Token"
 
 
 class QobuzAPIError(Exception):
@@ -18,100 +21,159 @@ class QobuzAPIError(Exception):
 
 
 class QobuzAuthError(QobuzAPIError):
-    """Authentication failed."""
+    """Authentication failed (bad credentials or expired token)."""
 
 
 class QobuzAPIClient:
-    """Async client for Qobuz REST API (unofficial endpoints)."""
+    """Async client for the Qobuz REST API (community-documented endpoints)."""
 
     def __init__(self, session: ClientSession) -> None:
         self._session = session
         self._user_id: str | None = None
         self._token: str | None = None
-        self._app_id: str | None = None  # obtained or configured
-        self._app_secret: str | None = None
+        self._app_id: str = QOBUZ_APP_ID
+
+    # ------------------------------------------------------------------
+    # Auth
+    # ------------------------------------------------------------------
 
     async def login(self, email: str, password: str) -> dict[str, Any]:
-        """Perform login and return user info + token."""
-        # Placeholder: real impl would POST to /user/login or similar with email/pass
-        # and handle 2FA if needed. Returns dict with user_id, token, etc.
-        _LOGGER.debug("Attempting login for %s", email)
-        # Simulate
-        await asyncio.sleep(0.1)
-        # In real: construct signed request, etc.
-        self._user_id = "mock_user_123"
-        self._token = "mock_jwt_token_for_qobuz"
-        return {"user_id": self._user_id, "token": self._token, "email": email}
+        """Authenticate with Qobuz and return session data.
 
-    async def _request(
-        self, method: str, endpoint: str, **kwargs: Any
-    ) -> dict[str, Any]:
-        """Internal request helper with auth headers."""
-        url = f"{QOBUZ_API_BASE}{endpoint}"
-        headers = kwargs.pop("headers", {})
-        if self._token:
-            headers["Authorization"] = f"Bearer {self._token}"
-        if self._app_id:
-            headers["X-App-Id"] = self._app_id
+        Uses the community-documented /user/login endpoint.  The app_id is
+        required by Qobuz for all API requests; the default value (QOBUZ_APP_ID)
+        is the publicly visible web-player app_id used by many open-source
+        Qobuz clients.
+        """
+        _LOGGER.debug("Attempting Qobuz login for %s", email)
 
-        timeout = ClientTimeout(total=15)
-        async with self._session.request(
-            method, url, headers=headers, timeout=timeout, **kwargs
-        ) as resp:
-            if resp.status == 401:
-                raise QobuzAuthError("Token expired or invalid")
-            resp.raise_for_status()
-            return await resp.json()
+        url = f"{QOBUZ_API_BASE}/user/login"
+        params = {
+            "email": email,
+            "password": password,
+            "app_id": self._app_id,
+        }
+        headers = {_HEADER_APP_ID: self._app_id}
 
-    async def get_playlists(self) -> list[dict[str, Any]]:
-        """Fetch user playlists."""
-        data = await self._request("GET", "/playlist/getUserPlaylists")
-        return data.get("playlists", [])
-
-    async def get_playlist_tracks(self, playlist_id: str) -> list[dict[str, Any]]:
-        """Get tracks for a playlist."""
-        data = await self._request(
-            "GET", "/playlist/get", params={"playlist_id": playlist_id}
-        )
-        return data.get("tracks", {}).get("items", [])
-
-    async def get_favorites(self, type: str = "tracks") -> list[dict[str, Any]]:
-        """Get user favorites."""
-        data = await self._request("GET", "/favorite/getUserFavorites", params={"type": type})
-        return data.get("favorites", [])
-
-    async def get_current_playback(self) -> dict[str, Any] | None:
-        """Fetch current playback status if available via API."""
         try:
-            return await self._request("GET", "/player/getState")
+            timeout = ClientTimeout(total=15)
+            async with self._session.request(
+                "GET", url, params=params, headers=headers, timeout=timeout
+            ) as resp:
+                if resp.status in {400, 401, 403}:
+                    raise QobuzAuthError("Invalid email or password")
+                resp.raise_for_status()
+                data: dict[str, Any] = await resp.json()
         except QobuzAuthError:
             raise
-        except QobuzAPIError as err:
-            # Endpoint may not exist on all account types; log and return None
-            _LOGGER.debug("Could not fetch playback state: %s", err)
-            return None
+        except ClientResponseError as err:
+            raise QobuzAPIError(f"Login request failed: {err.status} {err.message}") from err
         except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("Unexpected error fetching playback state: %s", err)
-            return None
+            raise QobuzAPIError(f"Login request failed: {err}") from err
 
-    async def play_track(self, track_id: str) -> None:
-        """Initiate playback of a track (if API supports)."""
-        await self._request("POST", "/player/play", json={"track_id": track_id})
+        token: str = data.get("user_auth_token", "")
+        if not token:
+            _LOGGER.debug("Login response: %s", data)
+            raise QobuzAuthError("No auth token in Qobuz login response")
 
-    # Add more methods: search, album details, etc. as discovered
+        user_id: str = str(data.get("user", {}).get("id", ""))
 
-    def set_auth(self, token: str, user_id: str) -> None:
-        """Restore a previously obtained auth token (e.g. from a config entry)."""
         self._token = token
         self._user_id = user_id
 
-    def set_credentials(self, app_id: str | None = None, app_secret: str | None = None) -> None:
-        """Allow runtime override of app credentials."""
+        _LOGGER.debug("Login successful for user_id=%s", user_id)
+        return {"user_id": user_id, "token": token, "app_id": self._app_id, "email": email}
+
+    def set_auth(self, token: str, user_id: str, app_id: str | None = None) -> None:
+        """Restore credentials from a previously obtained session (e.g. config entry)."""
+        self._token = token
+        self._user_id = user_id
         if app_id:
             self._app_id = app_id
-        if app_secret:
-            self._app_secret = app_secret
+
+    def set_credentials(self, app_id: str | None = None, app_secret: str | None = None) -> None:
+        """Allow runtime override of app credentials (options flow)."""
+        if app_id:
+            self._app_id = app_id
 
     @property
     def is_authenticated(self) -> bool:
         return bool(self._token and self._user_id)
+
+    # ------------------------------------------------------------------
+    # Internal request helper
+    # ------------------------------------------------------------------
+
+    async def _request(
+        self, method: str, endpoint: str, **kwargs: Any
+    ) -> dict[str, Any]:
+        """Execute an authenticated API request."""
+        url = f"{QOBUZ_API_BASE}{endpoint}"
+        headers: dict[str, str] = kwargs.pop("headers", {})
+        headers[_HEADER_APP_ID] = self._app_id
+        if self._token:
+            headers[_HEADER_AUTH_TOKEN] = self._token
+
+        timeout = ClientTimeout(total=15)
+        try:
+            async with self._session.request(
+                method, url, headers=headers, timeout=timeout, **kwargs
+            ) as resp:
+                if resp.status == 401:
+                    raise QobuzAuthError("Token expired or invalid")
+                resp.raise_for_status()
+                return await resp.json()
+        except QobuzAuthError:
+            raise
+        except ClientResponseError as err:
+            raise QobuzAPIError(f"{endpoint} failed: {err.status} {err.message}") from err
+
+    # ------------------------------------------------------------------
+    # Library endpoints
+    # ------------------------------------------------------------------
+
+    async def get_playlists(self) -> list[dict[str, Any]]:
+        """Fetch the authenticated user's playlists."""
+        data = await self._request(
+            "GET",
+            "/playlist/getUserPlaylists",
+            params={"limit": 500, "offset": 0},
+        )
+        return data.get("playlists", {}).get("items", [])
+
+    async def get_playlist_tracks(self, playlist_id: str) -> list[dict[str, Any]]:
+        """Fetch tracks for a specific playlist."""
+        data = await self._request(
+            "GET",
+            "/playlist/get",
+            params={"playlist_id": playlist_id, "limit": 500, "offset": 0, "extra": "tracks"},
+        )
+        return data.get("tracks", {}).get("items", [])
+
+    async def get_favorites(self, favor_type: str = "tracks") -> list[dict[str, Any]]:
+        """Fetch the user's favourited items."""
+        data = await self._request(
+            "GET",
+            "/favorite/getUserFavorites",
+            params={"type": favor_type, "limit": 500, "offset": 0},
+        )
+        return data.get(favor_type, {}).get("items", [])
+
+    async def get_current_playback(self) -> dict[str, Any] | None:
+        """Attempt to fetch current playback state.
+
+        Returns None if the endpoint does not exist or returns an error; this
+        endpoint is not consistently available across all account types.
+        Auth errors are re-raised so the coordinator can trigger reauth.
+        """
+        try:
+            return await self._request("GET", "/player/getState")
+        except QobuzAuthError:
+            raise
+        except (QobuzAPIError, Exception) as err:  # noqa: BLE001
+            _LOGGER.debug("Could not fetch playback state (endpoint may not exist): %s", err)
+            return None
+
+    async def play_track(self, track_id: str) -> None:
+        """Request playback of a specific track."""
+        await self._request("POST", "/player/play", json={"track_id": track_id})

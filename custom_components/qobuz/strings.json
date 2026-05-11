@@ -15,7 +15,8 @@
       "unknown": "Unexpected error. Check logs for details."
     },
     "abort": {
-      "already_configured": "Account is already configured."
+      "already_configured": "Account is already configured.",
+      "reauth_successful": "Re-authentication was successful."
     }
   }
 }

@@ -33,12 +33,18 @@ async def test_api_error_raises_update_failed(hass, mock_api):
         await coordinator._async_update_data()
 
 
-async def test_auth_error_raises_update_failed(hass, mock_api):
-    """A QobuzAuthError (subclass of QobuzAPIError) should also raise UpdateFailed."""
+async def test_auth_error_raises_config_entry_auth_failed(hass, mock_api):
+    """A QobuzAuthError should raise ConfigEntryAuthFailed, not UpdateFailed.
+
+    This causes HA to show 'Reauthorisation required' instead of retrying
+    forever with a broken token.
+    """
+    from homeassistant.exceptions import ConfigEntryAuthFailed
+
     mock_api.get_playlists = AsyncMock(side_effect=QobuzAuthError("token expired"))
 
     coordinator = QobuzDataUpdateCoordinator(hass, mock_api)
-    with pytest.raises(UpdateFailed, match="token expired"):
+    with pytest.raises(ConfigEntryAuthFailed):
         await coordinator._async_update_data()
 
 

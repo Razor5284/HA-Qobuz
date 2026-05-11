@@ -6,9 +6,10 @@ import logging
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import QobuzAPIClient, QobuzAPIError
+from .api import QobuzAPIClient, QobuzAPIError, QobuzAuthError
 from .const import DEFAULT_POLL_INTERVAL, DOMAIN
 
 if TYPE_CHECKING:
@@ -18,7 +19,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class QobuzDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
-    """Coordinator to fetch Qobuz data."""
+    """Coordinator that polls Qobuz for library and playback state."""
 
     def __init__(
         self,
@@ -46,5 +47,9 @@ class QobuzDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "current_playback": self.current_playback,
                 "authenticated": self.api.is_authenticated,
             }
+        except QobuzAuthError as err:
+            # Raising ConfigEntryAuthFailed tells HA to show "Reauthorisation
+            # required" and offer the reauth flow instead of retrying forever.
+            raise ConfigEntryAuthFailed(str(err)) from err
         except QobuzAPIError as err:
             raise UpdateFailed(f"Error communicating with Qobuz API: {err}") from err

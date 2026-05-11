@@ -39,7 +39,7 @@ async def test_successful_login_creates_entry(hass, bypass_setup):
         "custom_components.qobuz.config_flow.QobuzAPIClient"
     ) as mock_cls:
         mock_cls.return_value.login = AsyncMock(
-            return_value={"user_id": "u1", "token": "tok1"}
+            return_value={"user_id": "u1", "token": "tok1", "app_id": "950096963"}
         )
 
         result = await _start_flow(hass)
@@ -53,6 +53,7 @@ async def test_successful_login_creates_entry(hass, bypass_setup):
     assert result["data"]["email"] == "me@example.com"
     assert result["data"]["user_id"] == "u1"
     assert result["data"]["token"] == "tok1"
+    assert result["data"]["app_id"] == "950096963"
     # Password must never be persisted
     assert "password" not in result["data"]
 
