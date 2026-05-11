@@ -60,7 +60,16 @@ Inspired by the excellent [SpotifyPlus](https://github.com/thlucas1/homeassistan
 
 ## Changelog
 
-See GitHub releases for detailed changes. **v0.9.0** adds the full QConnect WebSocket controller (device list, transfer, play/pause via Connect).
+See GitHub releases for detailed changes.
+
+**v0.10.0** — Connect playback state, metadata & track skipping:
+- **Fix**: Connect WebSocket now processes `RENDERER_STATE_UPDATED`, `QUEUE_STATE`, and `SESSION_STATE` messages — playback state (playing/paused), track metadata, and device info are now properly surfaced to the media player entity
+- **Fix**: When the REST `/player/getState` endpoint returns no data (common for most accounts), the coordinator falls back to Connect WebSocket state and fetches track metadata via `get_track_info()` API
+- **New**: Next/previous track via Qobuz Connect protocol (sends `CtrlSrvrSetPlayerState` with target queue item)
+- **New**: On WebSocket connect, client immediately requests current renderer and queue state so existing playback is picked up
+- **New**: `source` attribute and source list now reliably reflect Connect devices and the active playback device
+
+**v0.9.0** — Full QConnect WebSocket controller (device list, transfer, play/pause via Connect).
 
 ## Troubleshooting
 
