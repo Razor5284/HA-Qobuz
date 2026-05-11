@@ -1,13 +1,15 @@
 {
   "domain": "qobuz",
   "name": "Qobuz",
-  "codeowners": ["@yourusername"],
+  "codeowners": [
+    "@Razor5284"
+  ],
   "config_flow": true,
   "dependencies": [],
-  "documentation": "https://github.com/yourusername/HA-Qobuz",
+  "documentation": "https://github.com/Razor5284/HA-Qobuz",
   "integration_type": "service",
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/yourusername/HA-Qobuz/issues",
+  "issue_tracker": "https://github.com/Razor5284/HA-Qobuz/issues",
   "requirements": [
     "aiohttp>=3.10.0",
     "websockets>=12.0"
