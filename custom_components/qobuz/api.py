@@ -2,18 +2,24 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import logging
 import re
+import time
 from typing import Any
 
 from aiohttp import ClientResponseError, ClientSession, ClientTimeout
 
-from .const import QOBUZ_API_BASE, QOBUZ_APP_ID
+from .const import DEFAULT_QUALITY, QOBUZ_API_BASE, QOBUZ_APP_ID
 
 _BUNDLE_URL_RE = re.compile(
     r'<script src="(/resources/[\d.\-a-z]+/bundle\.js)"></script>'
 )
 _APP_ID_RE = re.compile(r'production:\{api:\{appId:"(?P<app_id>\d{9})"')
+_SEED_TZ_RE = re.compile(
+    r'[a-z]\.initialSeed\("(?P<seed>[\w=]+)",window\.utimezone\.(?P<timezone>[a-z]+)\)'
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -38,20 +44,74 @@ class QobuzAPIClient:
         self._user_id: str | None = None
         self._token: str | None = None
         self._app_id: str = QOBUZ_APP_ID
+        self._app_secret: str | None = None
 
     # ------------------------------------------------------------------
-    # Auth
+    # Credential scraping
     # ------------------------------------------------------------------
 
     async def scrape_app_id(self) -> str:
-        """Scrape the current app_id from the Qobuz web player bundle.
+        """Scrape the current app_id from the Qobuz web player bundle."""
+        bundle_js = await self._fetch_bundle()
+        if not bundle_js:
+            return QOBUZ_APP_ID
+        am = _APP_ID_RE.search(bundle_js)
+        if not am:
+            _LOGGER.debug("Could not find app_id in Qobuz bundle JS")
+            return QOBUZ_APP_ID
+        scraped = am.group("app_id")
+        _LOGGER.debug("Scraped Qobuz app_id: %s", scraped)
+        return scraped
 
-        Qobuz rotates the app_id periodically.  This method fetches the login
-        page, extracts the bundle JS URL, then reads the app_id regex from the
-        minified JS.  Falls back to the compile-time constant on any failure.
+    async def scrape_app_credentials(self) -> tuple[str, str | None]:
+        """Scrape both app_id and app_secret from the Qobuz bundle JS.
+
+        The secret is embedded in obfuscated form; this uses the same
+        seed+timezone+info+extras decode used by community tools (QobuzDL).
+        Returns (app_id, app_secret | None).
         """
+        bundle_js = await self._fetch_bundle()
+        if not bundle_js:
+            return QOBUZ_APP_ID, None
+
+        am = _APP_ID_RE.search(bundle_js)
+        app_id = am.group("app_id") if am else QOBUZ_APP_ID
+
+        # Build timezone → secret arrays
+        secrets: dict[str, list[str]] = {}
+        for seed_m in _SEED_TZ_RE.finditer(bundle_js):
+            tz = seed_m.group("timezone")
+            secrets[tz] = [seed_m.group("seed")]
+
+        if not secrets:
+            _LOGGER.debug("No seed/timezone entries found in bundle; app_secret unavailable")
+            return app_id, None
+
+        timezones = "|".join(tz.capitalize() for tz in secrets)
+        info_extras_re = re.compile(
+            rf'name:"\w+/(?P<tz>{timezones})",info:"(?P<info>[\w=]+)",extras:"(?P<extras>[\w=]+)"'
+        )
+        for m in info_extras_re.finditer(bundle_js):
+            tz = m.group("tz").lower()
+            if tz in secrets:
+                secrets[tz].extend([m.group("info"), m.group("extras")])
+
+        for secret_parts in secrets.values():
+            combined = "".join(secret_parts)[:-44]
+            try:
+                candidate = base64.b64decode(combined).decode("utf-8")
+                if candidate:
+                    _LOGGER.debug("Scraped Qobuz app_secret (first 6): %s...", candidate[:6])
+                    return app_id, candidate
+            except Exception:  # noqa: BLE001
+                continue
+
+        return app_id, None
+
+    async def _fetch_bundle(self) -> str | None:
+        """Fetch the Qobuz web player bundle JS; return None on failure."""
         try:
-            timeout = ClientTimeout(total=15)
+            timeout = ClientTimeout(total=20)
             async with self._session.get(
                 "https://play.qobuz.com/login", timeout=timeout
             ) as resp:
@@ -60,43 +120,29 @@ class QobuzAPIClient:
             m = _BUNDLE_URL_RE.search(login_html)
             if not m:
                 _LOGGER.debug("Could not locate bundle URL in Qobuz login page")
-                return QOBUZ_APP_ID
+                return None
 
             bundle_path = m.group(1)
             async with self._session.get(
                 f"https://play.qobuz.com{bundle_path}", timeout=timeout
             ) as resp:
-                bundle_js = await resp.text()
-
-            am = _APP_ID_RE.search(bundle_js)
-            if not am:
-                _LOGGER.debug("Could not find app_id in Qobuz bundle JS")
-                return QOBUZ_APP_ID
-
-            scraped = am.group("app_id")
-            _LOGGER.debug("Scraped Qobuz app_id: %s", scraped)
-            return scraped
+                return await resp.text()
 
         except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("app_id scraping failed (%s), using fallback", err)
-            return QOBUZ_APP_ID
+            _LOGGER.debug("Bundle fetch failed: %s", err)
+            return None
+
+    # ------------------------------------------------------------------
+    # Auth
+    # ------------------------------------------------------------------
 
     async def validate_token(
         self, token: str, app_id: str | None = None
     ) -> dict[str, Any]:
-        """Validate a browser-extracted session token by making a real API call.
-
-        Qobuz's direct email/password login endpoint is reCAPTCHA-protected and
-        cannot be used by automated clients. Users must extract their session token
-        from play.qobuz.com browser Local Storage (localuser → token).
-
-        Returns a dict with user_id and app_id on success, raises QobuzAuthError
-        on failure.
-        """
-        # Use caller-supplied app_id, or scrape the live value from the web player
+        """Validate a browser-extracted session token via /user/get."""
         self._app_id = app_id or await self.scrape_app_id()
         self._token = token
-        self._user_id = None  # will be populated by the validation call
+        self._user_id = None
 
         _LOGGER.debug(
             "Validating Qobuz token (first %s...) with app_id=%s",
@@ -105,7 +151,6 @@ class QobuzAPIClient:
         )
 
         try:
-            # /user/get validates the token and returns the user profile
             data = await self._request("GET", "/user/get")
         except QobuzAuthError:
             raise
@@ -122,20 +167,31 @@ class QobuzAPIClient:
         return {"user_id": user_id, "app_id": self._app_id}
 
     def set_auth(self, token: str, user_id: str, app_id: str | None = None) -> None:
-        """Restore credentials from a previously obtained session (e.g. config entry)."""
+        """Restore credentials from a config entry."""
         self._token = token
         self._user_id = user_id
         if app_id:
             self._app_id = app_id
 
+    def set_app_secret(self, secret: str) -> None:
+        """Store the app_secret (required for stream URL signing)."""
+        self._app_secret = secret
+
     def set_credentials(self, app_id: str | None = None, app_secret: str | None = None) -> None:
-        """Allow runtime override of app credentials (options flow)."""
+        """Runtime override (options flow)."""
         if app_id:
             self._app_id = app_id
+        if app_secret:
+            self._app_secret = app_secret
 
     @property
     def is_authenticated(self) -> bool:
         return bool(self._token and self._user_id)
+
+    @property
+    def has_stream_support(self) -> bool:
+        """True if we have an app_secret and can generate signed stream URLs."""
+        return bool(self._app_secret)
 
     # ------------------------------------------------------------------
     # Internal request helper
@@ -144,28 +200,26 @@ class QobuzAPIClient:
     async def _request(
         self, method: str, endpoint: str, **kwargs: Any
     ) -> dict[str, Any]:
-        """Execute an authenticated API request.
-
-        Qobuz accepts credentials as both HTTP headers AND query parameters
-        depending on the API version and endpoint.  We send both to maximise
-        compatibility with whichever convention a given endpoint enforces.
-        """
+        """Execute an authenticated API request."""
         url = f"{QOBUZ_API_BASE}{endpoint}"
         headers: dict[str, str] = kwargs.pop("headers", {})
-        # Merge caller-supplied params so we don't overwrite them
         params: dict[str, Any] = dict(kwargs.pop("params", {}))
 
-        # Credentials in headers
         headers[_HEADER_APP_ID] = self._app_id
         if self._token:
             headers[_HEADER_AUTH_TOKEN] = self._token
 
-        # Credentials also in query params — many Qobuz endpoints require this
+        # Many Qobuz endpoints also require credentials as query params
         params["app_id"] = self._app_id
         if self._token:
             params["user_auth_token"] = self._token
 
-        _LOGGER.debug("Qobuz request: %s %s params=%s", method, endpoint, {k: v for k, v in params.items() if k != "user_auth_token"})
+        _LOGGER.debug(
+            "Qobuz %s %s params=%s",
+            method,
+            endpoint,
+            {k: v for k, v in params.items() if k not in {"user_auth_token"}},
+        )
 
         timeout = ClientTimeout(total=15)
         try:
@@ -182,11 +236,19 @@ class QobuzAPIClient:
             raise QobuzAPIError(f"{endpoint} failed: {err.status} {err.message}") from err
 
     # ------------------------------------------------------------------
-    # Library endpoints
+    # User / account
+    # ------------------------------------------------------------------
+
+    async def get_user_info(self) -> dict[str, Any]:
+        """Fetch the authenticated user's profile."""
+        return await self._request("GET", "/user/get")
+
+    # ------------------------------------------------------------------
+    # Library
     # ------------------------------------------------------------------
 
     async def get_playlists(self) -> list[dict[str, Any]]:
-        """Fetch the authenticated user's playlists."""
+        """Fetch the user's playlists."""
         data = await self._request(
             "GET",
             "/playlist/getUserPlaylists",
@@ -203,30 +265,96 @@ class QobuzAPIClient:
         )
         return data.get("tracks", {}).get("items", [])
 
-    async def get_favorites(self, favor_type: str = "tracks") -> list[dict[str, Any]]:
-        """Fetch the user's favourited items."""
+    async def get_favorite_tracks(self) -> list[dict[str, Any]]:
+        """Fetch the user's favourite tracks."""
         data = await self._request(
             "GET",
             "/favorite/getUserFavorites",
-            params={"type": favor_type, "limit": 500, "offset": 0},
+            params={"type": "tracks", "limit": 500, "offset": 0},
         )
-        return data.get(favor_type, {}).get("items", [])
+        return data.get("tracks", {}).get("items", [])
+
+    async def get_favorite_albums(self) -> list[dict[str, Any]]:
+        """Fetch the user's favourite albums."""
+        data = await self._request(
+            "GET",
+            "/favorite/getUserFavorites",
+            params={"type": "albums", "limit": 500, "offset": 0},
+        )
+        return data.get("albums", {}).get("items", [])
+
+    async def get_favorite_artists(self) -> list[dict[str, Any]]:
+        """Fetch the user's favourite artists."""
+        data = await self._request(
+            "GET",
+            "/favorite/getUserFavorites",
+            params={"type": "artists", "limit": 500, "offset": 0},
+        )
+        return data.get("artists", {}).get("items", [])
+
+    async def get_album(self, album_id: str) -> dict[str, Any]:
+        """Fetch album details including tracks."""
+        return await self._request(
+            "GET",
+            "/album/get",
+            params={"album_id": album_id, "extra": "tracks"},
+        )
+
+    async def search(self, query: str, limit: int = 20) -> dict[str, Any]:
+        """Search across Qobuz catalogue."""
+        return await self._request(
+            "GET",
+            "/catalog/search",
+            params={"query": query, "limit": limit, "offset": 0},
+        )
+
+    # ------------------------------------------------------------------
+    # Playback / streaming
+    # ------------------------------------------------------------------
 
     async def get_current_playback(self) -> dict[str, Any] | None:
-        """Attempt to fetch current playback state.
-
-        Returns None if the endpoint does not exist or returns an error; this
-        endpoint is not consistently available across all account types.
-        Auth errors are re-raised so the coordinator can trigger reauth.
-        """
+        """Attempt to fetch current playback state (not available on all accounts)."""
         try:
             return await self._request("GET", "/player/getState")
         except QobuzAuthError:
             raise
         except (QobuzAPIError, Exception) as err:  # noqa: BLE001
-            _LOGGER.debug("Could not fetch playback state (endpoint may not exist): %s", err)
+            _LOGGER.debug("Could not fetch playback state: %s", err)
             return None
 
-    async def play_track(self, track_id: str) -> None:
-        """Request playback of a specific track."""
-        await self._request("POST", "/player/play", json={"track_id": track_id})
+    async def get_track_url(
+        self, track_id: str, format_id: int = DEFAULT_QUALITY
+    ) -> str | None:
+        """Return a signed stream URL for a track.
+
+        Requires app_secret to be set (call scrape_app_credentials() first).
+        Returns None if no secret is available.
+        """
+        if not self._app_secret:
+            _LOGGER.debug("No app_secret — cannot generate stream URL")
+            return None
+
+        ts = int(time.time())
+        r_sig = f"trackgetFileUrlformat_id{format_id}intentstreamtrack_id{track_id}{ts}{self._app_secret}"
+        r_sig_hashed = hashlib.md5(r_sig.encode()).hexdigest()  # noqa: S324
+
+        try:
+            data = await self._request(
+                "GET",
+                "/track/getFileUrl",
+                params={
+                    "track_id": track_id,
+                    "format_id": format_id,
+                    "intent": "stream",
+                    "request_ts": ts,
+                    "request_sig": r_sig_hashed,
+                },
+            )
+            return data.get("url")
+        except QobuzAPIError as err:
+            _LOGGER.debug("get_track_url failed for track %s: %s", track_id, err)
+            return None
+
+    async def get_track_info(self, track_id: str) -> dict[str, Any]:
+        """Fetch metadata for a single track."""
+        return await self._request("GET", "/track/get", params={"track_id": track_id})

@@ -17,8 +17,6 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.qobuz.const import DOMAIN
 
-# Explicitly activate the pytest-homeassistant-custom-component plugin so HA's
-# integration loader can discover custom components during tests.
 pytest_plugins = "pytest_homeassistant_custom_component"
 
 
@@ -30,13 +28,7 @@ def auto_enable_custom_integrations(enable_custom_integrations):
 
 @pytest.fixture
 def bypass_setup():
-    """Prevent HA from running setup/teardown logic (for config flow tests).
-
-    Config flow tests verify the flow itself; they shouldn't exercise the full
-    integration setup, which would require a live Qobuz account or extensive
-    mocking of the coordinator. Patching both directions keeps the HA test
-    harness happy during teardown too.
-    """
+    """Prevent HA from running setup/teardown logic (for config flow tests)."""
     with (
         patch("custom_components.qobuz.async_setup_entry", return_value=True),
         patch("custom_components.qobuz.async_unload_entry", return_value=True),
@@ -46,18 +38,29 @@ def bypass_setup():
 
 @pytest.fixture
 def mock_api():
-    """Return a MagicMock that stands in for QobuzAPIClient.
-
-    All async methods are AsyncMock and return sensible fixtures so tests
-    that need a running coordinator don't hit the network.
-    """
+    """Return a MagicMock standing in for QobuzAPIClient."""
     api = MagicMock()
     api.is_authenticated = True
+    api.has_stream_support = False
     api.get_playlists = AsyncMock(
         return_value=[{"id": "p1", "name": "Test Playlist", "image": {}}]
     )
     api.get_current_playback = AsyncMock(return_value={"is_playing": False})
     api.get_playlist_tracks = AsyncMock(return_value=[])
+    api.get_favorite_tracks = AsyncMock(return_value=[])
+    api.get_favorite_albums = AsyncMock(return_value=[])
+    api.get_favorite_artists = AsyncMock(return_value=[])
+    api.get_user_info = AsyncMock(
+        return_value={
+            "id": 12345,
+            "display_name": "Test User",
+            "login": "testuser",
+            "email": "test@example.com",
+            "country_code": "GB",
+            "credential": {"description": "Sublime", "label": "Sublime"},
+        }
+    )
+    api.get_track_url = AsyncMock(return_value=None)
     api.play_track = AsyncMock()
     return api
 

@@ -1,4 +1,4 @@
-"""Config flow for the Qobuz integration.
+"""Config flow and options flow for the Qobuz integration.
 
 Qobuz's login endpoint is reCAPTCHA-protected and cannot be used by automated
 clients (this affects all third-party Qobuz tools, not just this integration).
@@ -16,7 +16,13 @@ from homeassistant import config_entries
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import QobuzAPIClient, QobuzAuthError
-from .const import CONF_APP_ID, CONF_EMAIL, DOMAIN
+from .const import (
+    CONF_APP_ID,
+    CONF_EMAIL,
+    CONF_POLL_INTERVAL,
+    DEFAULT_POLL_INTERVAL,
+    DOMAIN,
+)
 
 if TYPE_CHECKING:
     from homeassistant.data_entry_flow import FlowResult
@@ -45,12 +51,18 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
 
 
 class QobuzConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for Qobuz (browser-token auth)."""
+    """Handle the initial config flow for Qobuz (browser-token auth)."""
 
     VERSION = 1
 
     def __init__(self) -> None:
         self._reauth_entry: config_entries.ConfigEntry | None = None
+
+    @staticmethod
+    def async_get_options_flow(
+        config_entry: config_entries.ConfigEntry,
+    ) -> QobuzOptionsFlow:
+        return QobuzOptionsFlow(config_entry)
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -106,3 +118,29 @@ class QobuzConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self.context["entry_id"]
         )
         return await self.async_step_user()
+
+
+class QobuzOptionsFlow(config_entries.OptionsFlow):
+    """Options flow for Qobuz — adjustable polling and advanced settings."""
+
+    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
+        self._entry = config_entry
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Show the options form."""
+        if user_input is not None:
+            return self.async_create_entry(title="", data=user_input)
+
+        current_interval = self._entry.options.get(
+            CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL
+        )
+        schema = vol.Schema(
+            {
+                vol.Optional(CONF_POLL_INTERVAL, default=current_interval): vol.All(
+                    int, vol.Range(min=10, max=300)
+                ),
+            }
+        )
+        return self.async_show_form(step_id="init", data_schema=schema)
