@@ -12,7 +12,7 @@ How to get your token:
     2. Press F12 → Application tab → Local Storage → https://play.qobuz.com
     3. Click the 'localuser' row and copy the 'token' value.
 
-The app_id defaults to 950096963. You can also set QOBUZ_APP_ID as an env var.
+The app_id defaults to QOBUZ_APP_ID. You can also set QOBUZ_APP_ID as an env var.
 
 Requirements:
     pip install aiohttp
@@ -23,6 +23,10 @@ import asyncio
 import json
 import os
 import sys
+from typing import Any
+
+# Fallback app_id used if scraping fails. Kept in sync with const.py manually.
+_FALLBACK_APP_ID = "798273057"
 
 QOBUZ_API_BASE = "https://www.qobuz.com/api.json/0.2"
 _HEADER_APP_ID = "X-App-Id"
@@ -35,19 +39,41 @@ def _mask(s: str, keep: int = 8) -> str:
     return s[:keep] + "..." + s[-4:]
 
 
-async def run(token: str, app_id: str) -> None:
+async def scrape_app_id(session: Any) -> str:
+    """Scrape the live app_id from the Qobuz web player bundle."""
+    import re
+
+    try:
+        async with session.get("https://play.qobuz.com/login") as resp:
+            html = await resp.text()
+        m = re.search(r'<script src="(/resources/[\d.\-a-z]+/bundle\.js)"></script>', html)
+        if not m:
+            return _FALLBACK_APP_ID
+        async with session.get(f"https://play.qobuz.com{m.group(1)}") as resp:
+            bundle = await resp.text()
+        am = re.search(r'production:\{api:\{appId:"(?P<app_id>\d{9})"', bundle)
+        return am.group("app_id") if am else _FALLBACK_APP_ID
+    except Exception:  # noqa: BLE001
+        return _FALLBACK_APP_ID
+
+
+async def run(token: str, app_id: str | None) -> None:
     import aiohttp
 
-    print(f"\n{'='*60}")
-    print("  Qobuz API test")
-    print(f"  token:  {_mask(token)}")
-    print(f"  app_id: {app_id}")
-    print(f"{'='*60}\n")
-
-    headers = {_HEADER_APP_ID: app_id, _HEADER_AUTH_TOKEN: token}
-    params_base = {"app_id": app_id, "user_auth_token": token}
-
     async with aiohttp.ClientSession() as session:
+        if not app_id:
+            print("[ 0 ] Scraping live app_id from Qobuz web player ...")
+            app_id = await scrape_app_id(session)
+            print(f"      app_id: {app_id}\n")
+
+        print(f"\n{'='*60}")
+        print("  Qobuz API test")
+        print(f"  token:  {_mask(token)}")
+        print(f"  app_id: {app_id}")
+        print(f"{'='*60}\n")
+
+        headers = {_HEADER_APP_ID: app_id, _HEADER_AUTH_TOKEN: token}
+        params_base = {"app_id": app_id, "user_auth_token": token}
 
         # ---------------------------------------------------------------
         # Step 1: Validate token via /user/get
@@ -149,10 +175,10 @@ def main() -> None:
         sys.exit(1)
 
     token = sys.argv[1].strip()
-    app_id = (
-        sys.argv[2].strip()
-        if len(sys.argv) > 2
-        else os.environ.get("QOBUZ_APP_ID", "950096963")
+    # If a second arg or env var is given use it; otherwise scrape live value
+    app_id: str | None = (
+        sys.argv[2].strip() if len(sys.argv) > 2
+        else os.environ.get("QOBUZ_APP_ID")  # None → will scrape
     )
 
     asyncio.run(run(token, app_id))

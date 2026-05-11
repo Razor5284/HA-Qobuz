@@ -8,7 +8,7 @@ from homeassistant import config_entries
 from homeassistant.data_entry_flow import FlowResultType
 
 from custom_components.qobuz.api import QobuzAuthError
-from custom_components.qobuz.const import DOMAIN
+from custom_components.qobuz.const import DOMAIN, QOBUZ_APP_ID
 
 _VALID_TOKEN = "a" * 64  # realistic-length placeholder
 
@@ -35,7 +35,7 @@ async def test_valid_token_creates_entry(hass, bypass_setup):
     """A valid browser token creates a config entry. Password is never stored."""
     with patch("custom_components.qobuz.config_flow.QobuzAPIClient") as mock_cls:
         mock_cls.return_value.validate_token = AsyncMock(
-            return_value={"user_id": "u1", "app_id": "950096963"}
+            return_value={"user_id": "u1", "app_id": QOBUZ_APP_ID}
         )
 
         result = await _start_flow(hass)
@@ -48,7 +48,7 @@ async def test_valid_token_creates_entry(hass, bypass_setup):
     assert result["title"] == "Qobuz (me@example.com)"
     assert result["data"]["user_id"] == "u1"
     assert result["data"]["token"] == _VALID_TOKEN
-    assert result["data"]["app_id"] == "950096963"
+    assert result["data"]["app_id"] == QOBUZ_APP_ID
     assert "password" not in result["data"]
 
 

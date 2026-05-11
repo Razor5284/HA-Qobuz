@@ -67,7 +67,12 @@ def mock_config_entry() -> MockConfigEntry:
     """Return a MockConfigEntry pre-populated with safe test data."""
     return MockConfigEntry(
         domain=DOMAIN,
-        data={"email": "test@example.com", "user_id": "u1", "token": "t1"},
+        data={
+            "email": "test@example.com",
+            "user_id": "u1",
+            "token": "t1",
+            "app_id": "798273057",
+        },
         entry_id="test_entry",
     )
 
