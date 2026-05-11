@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import websockets
-from homeassistant.core import HomeAssistant
 
 from ..const import QOBUZ_WS_BASE
+
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -25,7 +27,7 @@ class QobuzConnectClient:
     async def connect(self) -> None:
         """Establish WS connection using JWT (obtained via qws/createToken)."""
         if not self._jwt:
-            _LOGGER.warning("No JWT for Connect; skipping WS")
+            _LOGGER.debug("No JWT for Connect; skipping WS connection")
             return
         try:
             self._ws = await websockets.connect(QOBUZ_WS_BASE)

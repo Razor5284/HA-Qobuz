@@ -6,7 +6,6 @@ import asyncio
 import logging
 from typing import Any
 
-import aiohttp
 from aiohttp import ClientSession, ClientTimeout
 
 from .const import QOBUZ_API_BASE
@@ -72,13 +71,13 @@ class QobuzAPIClient:
     async def get_playlist_tracks(self, playlist_id: str) -> list[dict[str, Any]]:
         """Get tracks for a playlist."""
         data = await self._request(
-            "GET", f"/playlist/get", params={"playlist_id": playlist_id}
+            "GET", "/playlist/get", params={"playlist_id": playlist_id}
         )
         return data.get("tracks", {}).get("items", [])
 
     async def get_favorites(self, type: str = "tracks") -> list[dict[str, Any]]:
         """Get user favorites."""
-        data = await self._request("GET", f"/favorite/getUserFavorites", params={"type": type})
+        data = await self._request("GET", "/favorite/getUserFavorites", params={"type": type})
         return data.get("favorites", [])
 
     async def get_current_playback(self) -> dict[str, Any] | None:

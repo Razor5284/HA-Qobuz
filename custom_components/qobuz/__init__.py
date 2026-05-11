@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import QobuzAPIClient
@@ -14,6 +13,10 @@ from .connect.client import QobuzConnectClient
 from .const import DOMAIN
 from .coordinator import QobuzDataUpdateCoordinator
 from .services import async_setup_services
+
+if TYPE_CHECKING:
+    from homeassistant.config_entries import ConfigEntry
+    from homeassistant.core import HomeAssistant
 
 _LOGGER = logging.getLogger(__name__)
 
