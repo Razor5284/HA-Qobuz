@@ -62,6 +62,12 @@ Inspired by the excellent [SpotifyPlus](https://github.com/thlucas1/homeassistan
 
 See GitHub releases for detailed changes.
 
+**v0.11.0** — Qobuz Connect token + HA playback fallback:
+- **Fix**: `/qws/createToken` matches the web player: POST form `jwt=jwt_qws` (literal) + `app_id`, session in `X-User-Auth-Token` only — restores Connect WebSocket for accounts that previously saw 400/503 on token creation
+- **Improvement**: Coordinator surfaces Connect metadata when renderer state is still `UNKNOWN` (after WS connect), and ignores explicit `STOPPED` so stale queue hints are not shown as now playing
+- **Docs / tooling**: `scripts/test_api.py` documents `/player/getState` 503 as common and probes `createToken` the same way as the integration
+- **Note**: REST `/player/getState` is still polled when available; it remains **503** for many accounts — Connect carries now playing in that case
+
 **v0.10.0** — Connect playback state, metadata & track skipping:
 - **Fix**: Connect WebSocket now processes `RENDERER_STATE_UPDATED`, `QUEUE_STATE`, and `SESSION_STATE` messages — playback state (playing/paused), track metadata, and device info are now properly surfaced to the media player entity
 - **Fix**: When the REST `/player/getState` endpoint returns no data (common for most accounts), the coordinator falls back to Connect WebSocket state and fetches track metadata via `get_track_info()` API

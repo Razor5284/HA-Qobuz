@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-INTEGRATION_VERSION = "0.10.0"
+INTEGRATION_VERSION = "0.11.0"
 
 
 class QobuzConnectClient:
