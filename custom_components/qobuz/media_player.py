@@ -78,9 +78,14 @@ class QobuzMediaPlayer(CoordinatorEntity[QobuzDataUpdateCoordinator], MediaPlaye
             async_dispatcher_connect(
                 self.hass,
                 f"{DOMAIN}_connect_{self._entry.entry_id}",
-                lambda *_args: self.schedule_update_ha_state(),
+                self._on_connect_update,
             )
         )
+
+    def _on_connect_update(self, *_args: Any) -> None:
+        """Connect pushed new devices or playback — refresh entity + coordinator."""
+        self.schedule_update_ha_state()
+        self.hass.async_create_task(self.coordinator.async_request_refresh())
 
     def _connect_client(self):  # noqa: ANN202
         if not self.hass:
@@ -209,8 +214,11 @@ class QobuzMediaPlayer(CoordinatorEntity[QobuzDataUpdateCoordinator], MediaPlaye
     @property
     def source_list(self) -> list[str]:
         client = self._connect_client()
-        if client and getattr(client, "devices", None):
-            return [d.get("name", "Unknown") for d in client.devices]
+        if client is None:
+            return ["This device"]
+        names = [d.get("name", "Unknown") for d in client.devices]
+        if names:
+            return names
         return ["This device"]
 
     # ------------------------------------------------------------------

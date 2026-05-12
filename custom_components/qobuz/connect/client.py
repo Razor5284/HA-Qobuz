@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-INTEGRATION_VERSION = "0.11.0"
+INTEGRATION_VERSION = "0.11.1"
 
 
 class QobuzConnectClient:
@@ -45,6 +45,11 @@ class QobuzConnectClient:
         self._active_renderer_id: int | None = None
         self._send_lock = asyncio.Lock()
         self._consecutive_failures = 0
+        # QConnect session identity (filled from SrvrCtrlSessionState; see qonductor)
+        self._join_device_uuid: bytes | None = None
+        self._session_uuid: bytes | None = None
+        self._session_id: int | None = None
+        self._pending_discovery_asks = False
 
         # Playback state from Connect WebSocket
         self.playing_state: int = 0  # PlayingState enum value
@@ -133,22 +138,41 @@ class QobuzConnectClient:
         ]
         self._notify_entity_update()
 
+    def _merge_update_renderer(self, di: Any) -> None:
+        """Apply SrvrCtrlUpdateRenderer (same device UUID, refreshed DeviceInfo)."""
+        if not di.device_uuid or len(di.device_uuid) != 16:
+            return
+        uid = bytes(di.device_uuid)
+        for rid, info in list(self._renderers.items()):
+            ex = info.get("device_info")
+            if ex and ex.device_uuid == uid:
+                name = di.friendly_name or di.model or info.get("name", f"Renderer {rid}")
+                self._renderers[rid] = {"name": name, "device_info": di}
+                self._sync_device_list()
+                _LOGGER.debug("Connect: updated renderer %s (%s)", rid, name)
+                return
+        _LOGGER.debug("Connect: update_renderer for unknown device_uuid")
+
     def _handle_qmsg(self, qmsg: Any) -> None:
         from .generated import QConnectMessageType  # noqa: PLC0415
 
         mt = qmsg.message_type or 0
         if mt == QConnectMessageType.MESSAGE_TYPE_SRVR_CTRL_ADD_RENDERER:
             add = qmsg.srvr_ctrl_add_renderer
-            if add and add.renderer_id and add.renderer:
+            if add and add.renderer and add.HasField("renderer_id"):
                 rid = int(add.renderer_id)
                 di = add.renderer
                 name = di.friendly_name or di.model or f"Renderer {rid}"
                 self._renderers[rid] = {"name": name, "device_info": di}
                 self._sync_device_list()
                 _LOGGER.debug("Connect: added renderer %s (%s)", rid, name)
+        elif mt == QConnectMessageType.MESSAGE_TYPE_SRVR_CTRL_UPDATE_RENDERER:
+            up = qmsg.srvr_ctrl_update_renderer
+            if up and up.renderer:
+                self._merge_update_renderer(up.renderer)
         elif mt == QConnectMessageType.MESSAGE_TYPE_SRVR_CTRL_REMOVE_RENDERER:
             rem = qmsg.srvr_ctrl_remove_renderer
-            if rem and rem.renderer_id:
+            if rem and rem.HasField("renderer_id"):
                 rid = int(rem.renderer_id)
                 self._renderers.pop(rid, None)
                 if self._active_renderer_id == rid:
@@ -157,13 +181,21 @@ class QobuzConnectClient:
                 _LOGGER.debug("Connect: removed renderer %s", rid)
         elif mt == QConnectMessageType.MESSAGE_TYPE_SRVR_CTRL_ACTIVE_RENDERER_CHANGED:
             ch = qmsg.srvr_ctrl_active_renderer_changed
-            if ch and ch.renderer_id is not None:
+            if ch and ch.HasField("renderer_id"):
                 self._active_renderer_id = int(ch.renderer_id)
                 self._notify_entity_update()
                 _LOGGER.debug("Connect: active renderer -> %s", self._active_renderer_id)
         elif mt == QConnectMessageType.MESSAGE_TYPE_SRVR_CTRL_RENDERER_STATE_UPDATED:
             rsu = qmsg.srvr_ctrl_renderer_state_updated
             if rsu and rsu.state:
+                if rsu.HasField("renderer_id"):
+                    rid = int(rsu.renderer_id)
+                    if rid not in self._renderers:
+                        self._renderers[rid] = {
+                            "name": f"Renderer {rid}",
+                            "device_info": None,
+                        }
+                        self._sync_device_list()
                 self._apply_renderer_state(rsu.state)
                 _LOGGER.debug(
                     "Connect: renderer state updated — playing_state=%s pos=%s dur=%s idx=%s",
@@ -175,9 +207,19 @@ class QobuzConnectClient:
         elif mt == QConnectMessageType.MESSAGE_TYPE_SRVR_CTRL_SESSION_STATE:
             ss = qmsg.srvr_ctrl_session_state
             if ss:
-                self.current_queue_index = int(ss.track_index) if ss.track_index else 0
+                if ss.HasField("session_id"):
+                    self._session_id = int(ss.session_id)
+                if ss.session_uuid and len(ss.session_uuid) == 16:
+                    self._session_uuid = bytes(ss.session_uuid)
+                if ss.HasField("track_index"):
+                    self.current_queue_index = int(ss.track_index)
+                self._pending_discovery_asks = True
                 self._notify_entity_update()
-                _LOGGER.debug("Connect: session state — track_index=%s", ss.track_index)
+                _LOGGER.debug(
+                    "Connect: session state — session_id=%s track_index=%s",
+                    self._session_id,
+                    ss.track_index if ss.HasField("track_index") else None,
+                )
         elif mt == QConnectMessageType.MESSAGE_TYPE_SRVR_CTRL_QUEUE_STATE:
             qs = qmsg.srvr_ctrl_queue_state
             if qs:
@@ -269,6 +311,7 @@ class QobuzConnectClient:
         )
 
         device_uuid = uuid.uuid4().bytes
+        self._join_device_uuid = device_uuid
         caps = DeviceCapabilities()
         caps.min_audio_quality = 1
         caps.max_audio_quality = 4
@@ -279,7 +322,8 @@ class QobuzConnectClient:
         info.friendly_name = "Home Assistant"
         info.brand = "Home Assistant"
         info.model = "Qobuz"
-        info.type = DeviceType.DEVICE_TYPE_SPEAKER
+        # Web-style controller — matches typical browser / remote control clients
+        info.type = DeviceType.DEVICE_TYPE_LAPTOP
         info.capabilities = caps
         info.software_version = f"ha-qobuz-{INTEGRATION_VERSION}"
 
@@ -302,16 +346,18 @@ class QobuzConnectClient:
         await self._send_raw(frame)
 
     async def _send_ask_for_renderer_state(self) -> None:
-        """Request current renderer state from the server after joining."""
+        """Request current renderer state (requires session_id once known)."""
         from .generated import (  # noqa: PLC0415
             CtrlSrvrAskForRendererState,
             QConnectMessage,
             QConnectMessageType,
         )
 
+        ask = CtrlSrvrAskForRendererState()
+        ask.session_id = int(self._session_id) if self._session_id is not None else 0
+
         qmsg = QConnectMessage()
         qmsg.message_type = QConnectMessageType.MESSAGE_TYPE_CTRL_SRVR_ASK_FOR_RENDERER_STATE
-        ask = CtrlSrvrAskForRendererState()
         qmsg.ctrl_srvr_ask_for_renderer_state = ask
 
         now = protocol.now_ms()
@@ -326,16 +372,23 @@ class QobuzConnectClient:
         await self._send_raw(frame)
 
     async def _send_ask_for_queue_state(self) -> None:
-        """Request current queue state from the server after joining."""
+        """Request queue state (queue_uuid = session UUID or our join UUID)."""
         from .generated import (  # noqa: PLC0415
             CtrlSrvrAskForQueueState,
             QConnectMessage,
             QConnectMessageType,
         )
 
+        queue_uuid = self._session_uuid or self._join_device_uuid
+        if not queue_uuid:
+            _LOGGER.debug("Connect: skip ask_for_queue_state (no queue UUID yet)")
+            return
+
+        ask = CtrlSrvrAskForQueueState()
+        ask.queue_uuid = queue_uuid
+
         qmsg = QConnectMessage()
         qmsg.message_type = QConnectMessageType.MESSAGE_TYPE_CTRL_SRVR_ASK_FOR_QUEUE_STATE
-        ask = CtrlSrvrAskForQueueState()
         qmsg.ctrl_srvr_ask_for_queue_state = ask
 
         now = protocol.now_ms()
@@ -348,6 +401,11 @@ class QobuzConnectClient:
             now_ms=now,
         )
         await self._send_raw(frame)
+
+    async def _send_discovery_asks(self) -> None:
+        """Ask server for renderer + queue snapshots (qonductor-style parameters)."""
+        await self._send_ask_for_renderer_state()
+        await self._send_ask_for_queue_state()
 
     async def _send_player_state(self, playing: bool, paused: bool) -> None:
         from .generated import (  # noqa: PLC0415
@@ -484,8 +542,19 @@ class QobuzConnectClient:
                 for batch in protocol.iter_batches_from_ws_binary(message):
                     for qmsg in batch.messages:
                         self._handle_qmsg(qmsg)
+                    await self._flush_pending_discovery_asks()
             elif isinstance(message, str):
                 _LOGGER.debug("Unexpected WS text: %s", message[:120])
+
+    async def _flush_pending_discovery_asks(self) -> None:
+        """Send AskFor* after SESSION_STATE (same event loop as WS reader)."""
+        if not self._pending_discovery_asks:
+            return
+        self._pending_discovery_asks = False
+        try:
+            await self._send_discovery_asks()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Connect: discovery asks failed: %s", err)
 
     async def _one_connection(self) -> bool:
         """Attempt one Connect session. Returns True if it connected successfully."""
@@ -513,11 +582,21 @@ class QobuzConnectClient:
         jwt = tok["jwt"]
         uri = tok["endpoint"]
         self._msg_id = 0
+        self._session_id = None
+        self._session_uuid = None
+        self._join_device_uuid = None
+        self._pending_discovery_asks = False
 
         try:
             self._ws = await websockets.connect(
                 uri,
-                additional_headers={"Origin": "https://play.qobuz.com"},
+                additional_headers={
+                    "Origin": "https://play.qobuz.com",
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                    ),
+                },
                 max_size=None,
             )
         except Exception as err:  # noqa: BLE001
@@ -536,8 +615,7 @@ class QobuzConnectClient:
             await self._send_authenticate(jwt)
             await self._send_subscribe()
             await self._send_join_controller()
-            await self._send_ask_for_renderer_state()
-            await self._send_ask_for_queue_state()
+            await self._send_discovery_asks()
             await self._receive_loop()
         except asyncio.CancelledError:
             raise
