@@ -62,6 +62,15 @@ Inspired by the excellent [SpotifyPlus](https://github.com/thlucas1/homeassistan
 
 See GitHub releases for detailed changes.
 
+**v0.11.6** — Connect stability, browse-to-play, and media controls:
+- **Queue deltas**: handle **`SRVR_CTRL_QUEUE_TRACKS_ADDED`**, **`QUEUE_CLEARED`**, **`QUEUE_VERSION_CHANGED`**, and server acks for shuffle/loop/volume/max audio quality; persist **`queue_hash`** / **`action_uuid`** for shuffle writes
+- **Shuffle**: build **`CtrlSrvrSetShuffleMode`** from **`qconnect_payload_pb2`** (not `qconnect_queue_pb2`)
+- **Repeat**: build **`CtrlSrvrSetLoopMode`** from payload protobuf; export **`CtrlSrvrSetLoopMode`** from `connect/generated/__init__.py`
+- **UI refresh**: **`async_refresh_playback()`** on the coordinator (playback only, no full library poll) after Connect transport; **`_on_connect_update`** schedules refresh with **`loop.call_soon_threadsafe`** so HA never sees **`async_create_task`** from a worker thread
+- **Browse → play**: longer queue wait loop, safer behaviour when the WebSocket closes mid-wait (**`ConnectionClosedError`** no longer bubbles to the UI)
+- **Media player**: **`media_position`** / duration from Connect, **`RepeatMode`** / shuffle properties, **`SEEK`**, **`VOLUME_SET`**, **`async_media_seek`**, **`async_set_volume_level`**; repeat toggle uses **`getattr(repeat, "value", repeat)`** for HA enums
+- **Service**: **`qobuz.set_streaming_quality`** → **`CtrlSrvrSetMaxAudioQuality`**
+
 **v0.11.4** — Connect playback UX (browse play, shuffle/repeat, devices):
 - **Browse → Play**: when Connect is connected, **play_media** clears the session queue (when a queue version exists), **QueueAddTracks** for the chosen track, then starts playback at index 0 (falls back to stream URL only if Connect is not ready)
 - **Shuffle / repeat**: wired to **CtrlSrvrSetShuffleMode** and **CtrlSrvrSetLoopMode**; media player uses an immediate **coordinator refresh** after transport so the UI tracks Connect faster than debounced `async_request_refresh`
