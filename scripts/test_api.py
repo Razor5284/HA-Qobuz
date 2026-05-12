@@ -12,6 +12,9 @@ How to get your token:
     2. Press F12 → Application tab → Local Storage → https://play.qobuz.com
     3. Click the 'localuser' row and copy the 'token' value.
 
+For /qws/createToken, the web player sends form field ``jwt=jwt_qws`` (literal
+string) plus ``app_id``; your session token is only in ``X-User-Auth-Token``.
+
 The app_id defaults to QOBUZ_APP_ID. You can also set QOBUZ_APP_ID as an env var.
 
 Requirements:
@@ -189,8 +192,8 @@ async def run(token: str, app_id: str | None) -> None:
             "Origin": "https://play.qobuz.com",
             "Referer": "https://play.qobuz.com/",
         }
-        # Form field name is jwt_qws (not jwt); value = same session token as headers.
-        post_body = {"app_id": app_id, "jwt_qws": token}
+        # Web player: POST body jwt=jwt_qws (literal) + app_id; session = X-User-Auth-Token only.
+        post_body = {"app_id": app_id, "jwt": "jwt_qws"}
         async with session.post(
             f"{QOBUZ_API_BASE}/qws/createToken",
             headers=ua_headers,
@@ -200,7 +203,7 @@ async def run(token: str, app_id: str | None) -> None:
             raw_ct = await resp.text()
             print(
                 f"      HTTP status: {resp.status} "
-                "(POST body: app_id + jwt_qws=<session token>)"
+                "(POST body: app_id + jwt=jwt_qws; session token in X-User-Auth-Token only)"
             )
             if resp.status == 200:
                 try:

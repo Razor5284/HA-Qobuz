@@ -327,9 +327,10 @@ class QobuzAPIClient:
           - ``endpoint``: WebSocket URL (e.g. regional ``wss://qws-…/ws``)
           - ``exp``: optional unix expiry seconds
 
-        The endpoint expects **POST** with form field ``jwt_qws`` (session token,
-        same string as ``X-User-Auth-Token`` / browser ``localuser.token``) plus
-        ``app_id``. Other field names return HTTP 400 from Qobuz.
+        The web player calls ``createQWSToken({tokenTypes: ["jwt_qws"]})``, which
+        becomes form field **``jwt=jwt_qws``** (literal string) plus ``app_id``.
+        The session token is sent only as **``X-User-Auth-Token``**, not as the
+        ``jwt`` body value. Using the session string as ``jwt`` returns HTTP 400.
         """
         raw = await self._request_qws_token()
         return self._parse_qws_response(raw)
@@ -385,10 +386,10 @@ class QobuzAPIClient:
         url = f"{QOBUZ_API_BASE}/qws/createToken"
         timeout = ClientTimeout(total=15)
 
-        # Qobuz: form key must be jwt_qws (400: "accepted values are jwt_qws" if you send jwt=…).
+        # Web bundle: createQWSToken({tokenTypes:["jwt_qws"]}) → paramsMapper → {jwt: tokenTypes}
+        # So the form sends jwt=jwt_qws (discriminator), NOT the session string. Auth is headers only.
         post_attempts: list[tuple[str, dict[str, str]]] = [
-            ("jwt_qws", {"app_id": self._app_id, "jwt_qws": self._token}),
-            ("jwt", {"app_id": self._app_id, "jwt": self._token}),
+            ("jwt_discriminator", {"app_id": self._app_id, "jwt": "jwt_qws"}),
             ("user_auth_token", {"app_id": self._app_id, "user_auth_token": self._token}),
         ] if self._token else [("app_id_only", {"app_id": self._app_id})]
 
