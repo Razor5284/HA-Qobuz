@@ -145,9 +145,9 @@ async def run(token: str, app_id: str | None) -> None:
                     print(f"  ⚠️  Response is not JSON: {raw_pl[:200]}")
 
         # ---------------------------------------------------------------
-        # Step 3: Playback state (optional endpoint)
+        # Step 3: Playback state (optional endpoint — often broken server-side)
         # ---------------------------------------------------------------
-        print("\n[ 3 ] Checking playback state endpoint ...")
+        print("\n[ 3 ] Checking REST playback endpoint (/player/getState) ...")
         async with session.get(
             f"{QOBUZ_API_BASE}/player/getState",
             params=params_base,
@@ -156,16 +156,75 @@ async def run(token: str, app_id: str | None) -> None:
         ) as resp:
             print(f"      HTTP status: {resp.status}")
             if resp.status == 200:
-                print("  ✅ Playback state endpoint exists")
+                print("  ✅ REST playback state returned (unusual but valid)")
             elif resp.status == 404:
-                print("  ℹ️  Playback state endpoint not found (expected for most accounts)")
+                print("  ℹ️  Not found — common; Home Assistant uses Qobuz Connect instead")
+            elif resp.status == 503:
+                print(
+                    "  ℹ️  503 Service Unavailable — common for this endpoint; "
+                    "not a token or subscription problem."
+                )
+                print(
+                    "     The integration does not rely on this for now-playing; "
+                    "it uses Qobuz Connect (WebSocket) when /qws/createToken succeeds."
+                )
             elif resp.status == 401:
                 print("  ❌ 401 on playback state — same token issue as above")
             else:
-                print(f"  ℹ️  Status {resp.status}")
+                print(f"  ℹ️  Status {resp.status} (REST playback may be unavailable)")
+
+        # ---------------------------------------------------------------
+        # Step 4: Qobuz Connect token (what HA uses for multi-device control)
+        # ---------------------------------------------------------------
+        print("\n[ 4 ] Checking Qobuz Connect token (/qws/createToken, POST) ...")
+        ua_headers = {
+            _HEADER_APP_ID: app_id,
+            _HEADER_AUTH_TOKEN: token,
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Accept-Language": "en-us,en;q=0.9",
+            "Origin": "https://play.qobuz.com",
+            "Referer": "https://play.qobuz.com/",
+        }
+        post_body = {"app_id": app_id, "user_auth_token": token}
+        async with session.post(
+            f"{QOBUZ_API_BASE}/qws/createToken",
+            headers=ua_headers,
+            data=post_body,
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as resp:
+            raw_ct = await resp.text()
+            print(f"      HTTP status: {resp.status}")
+            if resp.status == 200:
+                try:
+                    data_ct = json.loads(raw_ct)
+                except json.JSONDecodeError:
+                    print(f"  ⚠️  Response is not JSON: {raw_ct[:200]}")
+                else:
+                    nested = data_ct.get("jwt_qws")
+                    if isinstance(nested, dict):
+                        jwt_preview = nested.get("jwt") or nested.get("token")
+                        ep = nested.get("endpoint") or nested.get("url")
+                    else:
+                        jwt_preview = data_ct.get("jwt") or data_ct.get("token")
+                        ep = data_ct.get("endpoint") or data_ct.get("url")
+                    if jwt_preview:
+                        print("  ✅ createToken OK — Qobuz Connect WebSocket should be available")
+                        print(f"     endpoint: {ep or '(default)'}")
+                        print(f"     jwt: {_mask(str(jwt_preview), keep=12)}")
+                    else:
+                        print(f"  ⚠️  200 but no jwt in payload: {str(data_ct)[:300]}")
+            elif resp.status == 401:
+                print("  ❌ createToken 401 — token rejected for Connect")
+            else:
+                print(f"  ⚠️  createToken failed — Connect features need this (response: {raw_ct[:200]})")
 
         print(f"\n{'='*60}")
-        print("  Summary: token is working. The integration should function.")
+        print("  Summary: if [1] and [2] pass, your token and catalogue API work.")
+        print("  For playback on other devices, [4] should be 200 with a jwt.")
         print(f"{'='*60}\n")
 
 

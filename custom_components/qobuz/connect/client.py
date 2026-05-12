@@ -495,8 +495,9 @@ class QobuzConnectClient:
             if self._consecutive_failures == 0:
                 _LOGGER.warning(
                     "Qobuz Connect: cannot create WS token: %s "
-                    "(will keep retrying in the background; this is normal if "
-                    "your account/region does not support Qobuz Connect)",
+                    "(will keep retrying in the background). "
+                    "Playback from other devices uses Connect when this succeeds; "
+                    "REST /player/getState is often unavailable (503) even with a valid account.",
                     err,
                 )
             else:

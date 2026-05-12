@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import logging
 import re
 import time
@@ -26,6 +27,12 @@ _LOGGER = logging.getLogger(__name__)
 # Qobuz expects these specific headers for auth; NOT standard Bearer.
 _HEADER_APP_ID = "X-App-Id"
 _HEADER_AUTH_TOKEN = "X-User-Auth-Token"
+
+# Web-player-like context for createToken — some edge/CDN paths reject generic clients.
+_QOBUZ_BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
 
 
 class QobuzAPIError(Exception):
@@ -326,46 +333,87 @@ class QobuzAPIClient:
         raw = await self._request_qws_token()
         return self._parse_qws_response(raw)
 
+    def _qws_create_token_headers(self) -> dict[str, str]:
+        """Headers aligned with the Qobuz web player for ``/qws/createToken``."""
+        headers: dict[str, str] = {
+            _HEADER_APP_ID: self._app_id,
+            "User-Agent": _QOBUZ_BROWSER_UA,
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Accept-Language": "en-us,en;q=0.9",
+            "Origin": "https://play.qobuz.com",
+            "Referer": "https://play.qobuz.com/",
+        }
+        if self._token:
+            headers[_HEADER_AUTH_TOKEN] = self._token
+        return headers
+
+    async def _post_qws_create_token(
+        self, url: str, form: dict[str, str], label: str
+    ) -> dict[str, Any] | None:
+        """POST ``createToken`` once; return JSON on 200, None otherwise."""
+        timeout = ClientTimeout(total=15)
+        try:
+            async with self._session.post(
+                url,
+                headers=self._qws_create_token_headers(),
+                data=form,
+                timeout=timeout,
+            ) as resp:
+                raw = await resp.text()
+                if resp.status == 200:
+                    _LOGGER.debug("createToken succeeded via POST (%s)", label)
+                    return json.loads(raw)
+                if resp.status == 401:
+                    raise QobuzAuthError("Token expired or invalid")
+                _LOGGER.debug(
+                    "createToken POST %s -> HTTP %s: %s",
+                    label,
+                    resp.status,
+                    raw[:400],
+                )
+        except QobuzAuthError:
+            raise
+        except json.JSONDecodeError as err:
+            _LOGGER.debug("createToken POST %s: invalid JSON: %s", label, err)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("createToken POST %s failed: %s", label, err)
+        return None
+
     async def _request_qws_token(self) -> dict[str, Any]:
         """Try multiple approaches to obtain a QWS token."""
         url = f"{QOBUZ_API_BASE}/qws/createToken"
         timeout = ClientTimeout(total=15)
-        headers: dict[str, str] = {_HEADER_APP_ID: self._app_id}
-        if self._token:
-            headers[_HEADER_AUTH_TOKEN] = self._token
 
-        # Approach 1: POST with form-encoded body (documented method)
-        try:
-            body: dict[str, str] = {"app_id": self._app_id}
-            if self._token:
-                body["user_auth_token"] = self._token
-            async with self._session.post(
-                url, headers=headers, data=body, timeout=timeout,
-            ) as resp:
-                if resp.status == 200:
-                    _LOGGER.debug("createToken succeeded via POST")
-                    return await resp.json()
-                if resp.status == 401:
-                    raise QobuzAuthError("Token expired or invalid")
-                _LOGGER.debug("createToken POST returned %s, trying GET", resp.status)
-        except QobuzAuthError:
-            raise
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("createToken POST failed: %s, trying GET", err)
+        post_attempts: list[tuple[str, dict[str, str]]] = [
+            ("user_auth_token", {"app_id": self._app_id, "user_auth_token": self._token}),
+            ("jwt", {"app_id": self._app_id, "jwt": self._token}),
+        ] if self._token else [("app_id_only", {"app_id": self._app_id})]
 
-        # Approach 2: GET with query params (legacy / web-player style)
-        params = {"app_id": self._app_id}
+        for label, form in post_attempts:
+            parsed = await self._post_qws_create_token(url, form, label)
+            if parsed is not None:
+                return parsed
+
+        # GET with query params (legacy / fallback)
+        params: dict[str, str] = {"app_id": self._app_id}
         if self._token:
             params["user_auth_token"] = self._token
         try:
             async with self._session.get(
-                url, headers=headers, params=params, timeout=timeout,
+                url,
+                headers=self._qws_create_token_headers(),
+                params=params,
+                timeout=timeout,
             ) as resp:
                 if resp.status == 401:
                     raise QobuzAuthError("Token expired or invalid")
                 if resp.status == 200:
                     _LOGGER.debug("createToken succeeded via GET")
                     return await resp.json()
+                raw = await resp.text()
+                _LOGGER.debug(
+                    "createToken GET -> HTTP %s: %s", resp.status, raw[:400]
+                )
                 resp.raise_for_status()
         except QobuzAuthError:
             raise

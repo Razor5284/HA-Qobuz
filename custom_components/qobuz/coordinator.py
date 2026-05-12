@@ -85,11 +85,19 @@ class QobuzDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         cc = self.connect_client
         if not cc or not cc.connected:
             return None
-        if not cc.is_playing and not cc.is_paused:
+
+        raw_ps = getattr(cc, "playing_state", 0)
+        ps = raw_ps if isinstance(raw_ps, int) else 0
+        # 1 = PLAYING_STATE_STOPPED — do not reuse stale queue hints as "now playing"
+        if ps == 1:
             return None
 
-        track_id = cc.current_track_id
-        if not track_id:
+        if not (cc.is_playing or cc.is_paused) and (ps != 0 or cc.current_track_id is None):
+            # UNKNOWN(0) with a resolved queue track: still surface metadata until
+            # an explicit renderer state arrives (common right after WS connect).
+            return None
+
+        if not cc.current_track_id:
             return {
                 "is_playing": cc.is_playing,
                 "is_paused": cc.is_paused,
@@ -97,9 +105,16 @@ class QobuzDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "device_name": cc.active_device_name,
             }
 
-        track_info = await self._fetch_track_metadata(track_id)
+        track_info = await self._fetch_track_metadata(cc.current_track_id)
+        # UNKNOWN + timing hints: treat as playing for HA state (position/duration
+        # updates usually follow immediately).
+        ambiguous_playing = bool(
+            ps == 0
+            and not cc.is_paused
+            and (cc.current_position > 0 or cc.duration > 0)
+        )
         return {
-            "is_playing": cc.is_playing,
+            "is_playing": cc.is_playing or ambiguous_playing,
             "is_paused": cc.is_paused,
             "track": track_info,
             "position": cc.current_position,

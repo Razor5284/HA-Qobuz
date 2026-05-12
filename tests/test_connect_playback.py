@@ -237,7 +237,7 @@ async def test_coordinator_connect_fallback_no_track_id(hass, mock_api):
 
 
 async def test_coordinator_connect_fallback_stopped_returns_none(hass, mock_api):
-    """Connect fallback returns None if Connect is neither playing nor paused."""
+    """Connect fallback returns None if server reports STOPPED."""
     mock_api.get_current_playback = AsyncMock(return_value=None)
 
     coordinator = QobuzDataUpdateCoordinator(hass, mock_api)
@@ -246,11 +246,76 @@ async def test_coordinator_connect_fallback_stopped_returns_none(hass, mock_api)
     cc.connected = True
     cc.is_playing = False
     cc.is_paused = False
+    cc.playing_state = 1  # PLAYING_STATE_STOPPED
     coordinator.connect_client = cc
 
     await coordinator.async_refresh()
 
     assert coordinator.current_playback is None
+
+
+async def test_coordinator_connect_fallback_unknown_state_with_track(hass, mock_api):
+    """UNKNOWN playing_state with a queue track still yields Connect playback + metadata."""
+    mock_api.get_current_playback = AsyncMock(return_value=None)
+    mock_api.get_track_info = AsyncMock(return_value={
+        "id": 999,
+        "title": "Ambiguous Track",
+        "duration": 180,
+        "artist": {"name": "Artist"},
+        "album": {"title": "Album", "image": {}},
+    })
+
+    coordinator = QobuzDataUpdateCoordinator(hass, mock_api)
+
+    cc = MagicMock()
+    cc.connected = True
+    cc.is_playing = False
+    cc.is_paused = False
+    cc.playing_state = 0  # PLAYING_STATE_UNKNOWN
+    cc.current_track_id = 999
+    cc.current_position = 3000
+    cc.duration = 180
+    cc.active_device_name = "Kitchen"
+    coordinator.connect_client = cc
+
+    await coordinator.async_refresh()
+
+    assert coordinator.current_playback is not None
+    assert coordinator.current_playback["track"]["title"] == "Ambiguous Track"
+    assert coordinator.current_playback["is_playing"] is True
+    assert coordinator.current_playback["is_paused"] is False
+    assert coordinator.current_playback["source"] == "connect"
+
+
+async def test_coordinator_connect_fallback_unknown_no_timing_not_forced_playing(
+    hass, mock_api,
+):
+    """UNKNOWN state without position/duration does not set is_playing True."""
+    mock_api.get_current_playback = AsyncMock(return_value=None)
+    mock_api.get_track_info = AsyncMock(return_value={
+        "id": 1,
+        "title": "T",
+        "duration": 0,
+        "artist": {"name": "A"},
+        "album": {"title": "Al", "image": {}},
+    })
+
+    coordinator = QobuzDataUpdateCoordinator(hass, mock_api)
+    cc = MagicMock()
+    cc.connected = True
+    cc.is_playing = False
+    cc.is_paused = False
+    cc.playing_state = 0
+    cc.current_track_id = 1
+    cc.current_position = 0
+    cc.duration = 0
+    cc.active_device_name = None
+    coordinator.connect_client = cc
+
+    await coordinator.async_refresh()
+
+    assert coordinator.current_playback is not None
+    assert coordinator.current_playback["is_playing"] is False
 
 
 async def test_coordinator_connect_fallback_disconnected_returns_none(hass, mock_api):
