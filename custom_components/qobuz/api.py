@@ -320,10 +320,65 @@ class QobuzAPIClient:
           - ``endpoint``: WebSocket URL (e.g. regional ``wss://qws-…/ws``)
           - ``exp``: optional unix expiry seconds
 
-        Response shapes vary; we normalize nested ``jwt_qws`` objects from the API.
+        The endpoint requires POST (not GET). Tries the standard
+        authenticated POST first, then falls back to GET if needed.
         """
-        raw = await self._request("GET", "/qws/createToken")
+        raw = await self._request_qws_token()
+        return self._parse_qws_response(raw)
 
+    async def _request_qws_token(self) -> dict[str, Any]:
+        """Try multiple approaches to obtain a QWS token."""
+        url = f"{QOBUZ_API_BASE}/qws/createToken"
+        timeout = ClientTimeout(total=15)
+        headers: dict[str, str] = {_HEADER_APP_ID: self._app_id}
+        if self._token:
+            headers[_HEADER_AUTH_TOKEN] = self._token
+
+        # Approach 1: POST with form-encoded body (documented method)
+        try:
+            body: dict[str, str] = {"app_id": self._app_id}
+            if self._token:
+                body["user_auth_token"] = self._token
+            async with self._session.post(
+                url, headers=headers, data=body, timeout=timeout,
+            ) as resp:
+                if resp.status == 200:
+                    _LOGGER.debug("createToken succeeded via POST")
+                    return await resp.json()
+                if resp.status == 401:
+                    raise QobuzAuthError("Token expired or invalid")
+                _LOGGER.debug("createToken POST returned %s, trying GET", resp.status)
+        except QobuzAuthError:
+            raise
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("createToken POST failed: %s, trying GET", err)
+
+        # Approach 2: GET with query params (legacy / web-player style)
+        params = {"app_id": self._app_id}
+        if self._token:
+            params["user_auth_token"] = self._token
+        try:
+            async with self._session.get(
+                url, headers=headers, params=params, timeout=timeout,
+            ) as resp:
+                if resp.status == 401:
+                    raise QobuzAuthError("Token expired or invalid")
+                if resp.status == 200:
+                    _LOGGER.debug("createToken succeeded via GET")
+                    return await resp.json()
+                resp.raise_for_status()
+        except QobuzAuthError:
+            raise
+        except ClientResponseError as err:
+            raise QobuzAPIError(
+                f"/qws/createToken failed: {err.status} {err.message}"
+            ) from err
+
+        raise QobuzAPIError("/qws/createToken: all methods exhausted")
+
+    @staticmethod
+    def _parse_qws_response(raw: dict[str, Any]) -> dict[str, Any]:
+        """Normalize the various createToken response shapes."""
         nested = raw.get("jwt_qws")
         if isinstance(nested, dict):
             jwt = nested.get("jwt") or nested.get("token")
