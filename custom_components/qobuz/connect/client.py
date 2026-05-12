@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-INTEGRATION_VERSION = "0.11.5"
+INTEGRATION_VERSION = "0.11.6"
 
 # QConnect uses max uint64 as "no active renderer" in some server messages.
 RENDERER_ID_NO_ACTIVE = (1 << 64) - 1
@@ -902,9 +902,16 @@ class QobuzConnectClient:
 
         deadline = time.monotonic() + 6.0
         while time.monotonic() < deadline:
+            if not self._connected or self._ws is None:
+                _LOGGER.debug("Connect: play_track_now aborted (WebSocket closed)")
+                return False
             if self._queue_tracks and self._queue_version:
                 return await self._skip_to_queue_index(0)
-            await self._send_ask_for_queue_state()
+            try:
+                await self._send_ask_for_queue_state()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Connect: play_track_now ask_for_queue_state: %s", err)
+                return False
             await asyncio.sleep(0.2)
 
         _LOGGER.warning(
@@ -942,13 +949,11 @@ class QobuzConnectClient:
         """Set repeat / loop mode (qconnect LoopMode enum value)."""
         if not self._connected:
             return
-        from .generated import (  # noqa: PLC0415
-            CtrlSrvrSetLoopMode,
-            QConnectMessage,
-            QConnectMessageType,
-        )
+        import qconnect_payload_pb2 as qp
 
-        lm = CtrlSrvrSetLoopMode()
+        from .generated import QConnectMessage, QConnectMessageType
+
+        lm = qp.CtrlSrvrSetLoopMode()
         lm.mode = loop_mode
         qmsg = QConnectMessage()
         qmsg.message_type = QConnectMessageType.MESSAGE_TYPE_CTRL_SRVR_SET_LOOP_MODE

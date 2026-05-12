@@ -88,7 +88,14 @@ class QobuzMediaPlayer(CoordinatorEntity[QobuzDataUpdateCoordinator], MediaPlaye
     def _on_connect_update(self, *_args: Any) -> None:
         """Connect pushed new devices or playback — refresh entity + coordinator."""
         self.schedule_update_ha_state()
-        self.hass.async_create_task(self._coordinator_refresh_now())
+        # Dispatcher may run from a worker thread; never call async_create_task off-loop.
+        def _schedule_refresh() -> None:
+            self.hass.async_create_task(self._coordinator_refresh_now())
+
+        try:
+            self.hass.loop.call_soon_threadsafe(_schedule_refresh)
+        except RuntimeError:
+            _LOGGER.debug("Qobuz: skipped connect refresh schedule (event loop not available)")
 
     def _connect_client(self):  # noqa: ANN202
         if not self.hass:
