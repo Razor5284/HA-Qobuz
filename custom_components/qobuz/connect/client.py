@@ -21,7 +21,10 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-INTEGRATION_VERSION = "0.11.3"
+INTEGRATION_VERSION = "0.11.4"
+
+# QConnect uses max uint64 as "no active renderer" in some server messages.
+RENDERER_ID_NO_ACTIVE = (1 << 64) - 1
 
 
 def _default_ssl_context() -> ssl.SSLContext:
@@ -144,20 +147,46 @@ class QobuzConnectClient:
         ]
         self._notify_entity_update()
 
+    def _reset_connect_session_cache(self) -> None:
+        """Clear renderer/queue snapshot when a new WebSocket session starts."""
+        self._renderers.clear()
+        self.devices = []
+        self._active_renderer_id = None
+        self.queue_track_ids.clear()
+        self._queue_tracks.clear()
+        self._queue_version = None
+        self.playing_state = 0
+        self.current_position = 0
+        self.duration = 0
+        self.current_queue_index = 0
+
     def _merge_update_renderer(self, di: Any) -> None:
         """Apply SrvrCtrlUpdateRenderer (same device UUID, refreshed DeviceInfo)."""
-        if not di.device_uuid or len(di.device_uuid) != 16:
-            return
-        uid = bytes(di.device_uuid)
-        for rid, info in list(self._renderers.items()):
-            ex = info.get("device_info")
-            if ex and ex.device_uuid == uid:
-                name = di.friendly_name or di.model or info.get("name", f"Renderer {rid}")
-                self._renderers[rid] = {"name": name, "device_info": di}
-                self._sync_device_list()
-                _LOGGER.debug("Connect: updated renderer %s (%s)", rid, name)
-                return
-        _LOGGER.debug("Connect: update_renderer for unknown device_uuid")
+        if di.device_uuid and len(di.device_uuid) == 16:
+            uid = bytes(di.device_uuid)
+            for rid, info in list(self._renderers.items()):
+                ex = info.get("device_info")
+                if ex and ex.device_uuid == uid:
+                    name = di.friendly_name or di.model or info.get("name", f"Renderer {rid}")
+                    self._renderers[rid] = {"name": name, "device_info": di}
+                    self._sync_device_list()
+                    _LOGGER.debug("Connect: updated renderer %s (%s)", rid, name)
+                    return
+        # Fallback: some AVRs send updates with no UUID but a stable display name.
+        label = (di.friendly_name or di.model or di.brand or "").strip()
+        if label:
+            for rid, info in list(self._renderers.items()):
+                if (info.get("name") or "").strip() == label:
+                    self._renderers[rid] = {"name": label, "device_info": di}
+                    self._sync_device_list()
+                    _LOGGER.debug("Connect: updated renderer %s by name match", rid)
+                    return
+        _LOGGER.info(
+            "Connect: update_renderer unmatched (uuid=%s name=%r model=%r)",
+            bool(di.device_uuid and len(di.device_uuid) == 16),
+            di.friendly_name,
+            di.model,
+        )
 
     def _handle_qmsg(self, qmsg: Any) -> None:
         from .generated import QConnectMessageType  # noqa: PLC0415
@@ -165,10 +194,19 @@ class QobuzConnectClient:
         mt = qmsg.message_type or 0
         if mt == QConnectMessageType.MESSAGE_TYPE_SRVR_CTRL_ADD_RENDERER:
             add = qmsg.srvr_ctrl_add_renderer
-            if add and add.renderer and add.HasField("renderer_id"):
+            if add and add.HasField("renderer_id"):
                 rid = int(add.renderer_id)
-                di = add.renderer
-                name = di.friendly_name or di.model or f"Renderer {rid}"
+                if add.HasField("renderer"):
+                    di = add.renderer
+                    name = (
+                        di.friendly_name
+                        or di.model
+                        or di.brand
+                        or f"Renderer {rid}"
+                    )
+                else:
+                    di = None
+                    name = f"Renderer {rid}"
                 self._renderers[rid] = {"name": name, "device_info": di}
                 self._sync_device_list()
                 _LOGGER.debug("Connect: added renderer %s (%s)", rid, name)
@@ -188,22 +226,34 @@ class QobuzConnectClient:
         elif mt == QConnectMessageType.MESSAGE_TYPE_SRVR_CTRL_ACTIVE_RENDERER_CHANGED:
             ch = qmsg.srvr_ctrl_active_renderer_changed
             if ch and ch.HasField("renderer_id"):
-                self._active_renderer_id = int(ch.renderer_id)
+                rid = int(ch.renderer_id)
+                if rid == RENDERER_ID_NO_ACTIVE:
+                    self._active_renderer_id = None
+                    _LOGGER.debug("Connect: active renderer cleared (none)")
+                else:
+                    self._active_renderer_id = rid
+                    _LOGGER.debug("Connect: active renderer -> %s", self._active_renderer_id)
                 self._notify_entity_update()
-                _LOGGER.debug("Connect: active renderer -> %s", self._active_renderer_id)
         elif mt == QConnectMessageType.MESSAGE_TYPE_SRVR_CTRL_RENDERER_STATE_UPDATED:
             rsu = qmsg.srvr_ctrl_renderer_state_updated
             if rsu and rsu.state:
                 rid: int | None = None
                 if rsu.HasField("renderer_id"):
                     rid = int(rsu.renderer_id)
-                    if rid not in self._renderers:
+                    if rid != RENDERER_ID_NO_ACTIVE and rid not in self._renderers:
                         self._renderers[rid] = {
                             "name": f"Renderer {rid}",
                             "device_info": None,
                         }
                         self._sync_device_list()
-                    if (
+                    if rid == RENDERER_ID_NO_ACTIVE:
+                        self._apply_renderer_state(rsu.state)
+                        _LOGGER.debug(
+                            "Connect: renderer state (no active renderer) — ps=%s idx=%s",
+                            self.playing_state,
+                            self.current_queue_index,
+                        )
+                    elif (
                         self._active_renderer_id is not None
                         and rid != self._active_renderer_id
                     ):
@@ -306,6 +356,20 @@ class QobuzConnectClient:
             return
         async with self._send_lock:
             await self._ws.send(data)
+
+    async def _send_qconnect_ctrl(self, qmsg: Any) -> None:
+        """Send a single QConnectMessage wrapped as PAYLOAD batch."""
+        now = protocol.now_ms()
+        batch_mid = self._msg_id
+        payload_mid = self._next_msg_id()
+        await self._send_raw(
+            protocol.encode_qconnect_command(
+                qmsg,
+                batch_messages_id=batch_mid,
+                payload_msg_id=payload_mid,
+                now_ms=now,
+            )
+        )
 
     async def _send_authenticate(self, jwt: str) -> None:
         from .generated import Authenticate  # noqa: PLC0415
@@ -512,6 +576,7 @@ class QobuzConnectClient:
     async def _skip_to_queue_index(self, target_idx: int) -> bool:
         """Set the player state to play the track at the given queue index."""
         from .generated import (  # noqa: PLC0415
+            CtrlSrvrSetPlayerState,
             PlayingState,
             QConnectMessage,
             QConnectMessageType,
@@ -528,7 +593,7 @@ class QobuzConnectClient:
 
         qmsg = QConnectMessage()
         qmsg.message_type = QConnectMessageType.MESSAGE_TYPE_CTRL_SRVR_SET_PLAYER_STATE
-        ctrl = qmsg.ctrl_srvr_set_player_state
+        ctrl = CtrlSrvrSetPlayerState()
         ctrl.playing_state = PlayingState.PLAYING_STATE_PLAYING
         ctrl.current_position = 0
         qi = ctrl.current_queue_item
@@ -536,18 +601,8 @@ class QobuzConnectClient:
         qv = qi.queue_version
         qv.major = self._queue_version["major"]
         qv.minor = self._queue_version["minor"]
-
-        now = protocol.now_ms()
-        batch_mid = self._msg_id
-        payload_mid = self._next_msg_id()
-        frame = protocol.encode_qconnect_command(
-            qmsg,
-            batch_messages_id=batch_mid,
-            payload_msg_id=payload_mid,
-            now_ms=now,
-        )
-        await self._send_raw(frame)
-        self.current_queue_index = target_idx
+        qmsg.ctrl_srvr_set_player_state.CopyFrom(ctrl)
+        await self._send_qconnect_ctrl(qmsg)
         self._notify_entity_update()
         _LOGGER.debug("Connect: skipping to queue index %s (item %s)", target_idx, queue_item_id)
         return True
@@ -640,6 +695,7 @@ class QobuzConnectClient:
         self._connected = True
         self._consecutive_failures = 0
         _LOGGER.info("Qobuz Connect WebSocket connected to %s", uri)
+        self._reset_connect_session_cache()
 
         try:
             await self._send_authenticate(jwt)
@@ -667,6 +723,102 @@ class QobuzConnectClient:
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._stop.wait(), timeout=backoff)
             backoff = min(backoff * 2, 300)
+
+    async def play_track_now(self, track_id: int) -> bool:
+        """Clear the session queue, add one track, and start playback at index 0."""
+        if not self._connected or self._ws is None or track_id <= 0:
+            return False
+        import qconnect_queue_pb2 as qq
+
+        from .generated import QConnectMessage, QConnectMessageType
+
+        tid_u32 = track_id & 0xFFFFFFFF
+
+        if self._queue_version is not None:
+            clear = qq.CtrlSrvrClearQueue()
+            clear.queue_version.major = self._queue_version["major"]
+            clear.queue_version.minor = self._queue_version["minor"]
+            cq = QConnectMessage()
+            cq.message_type = QConnectMessageType.MESSAGE_TYPE_CTRL_SRVR_CLEAR_QUEUE
+            cq.ctrl_srvr_clear_queue.CopyFrom(clear)
+            await self._send_qconnect_ctrl(cq)
+            self._queue_version = None
+            self._queue_tracks.clear()
+            self.queue_track_ids.clear()
+
+        add = qq.CtrlSrvrQueueAddTracks()
+        if self._queue_version is not None:
+            add.queue_version.major = self._queue_version["major"]
+            add.queue_version.minor = self._queue_version["minor"]
+        tr = add.tracks.add()
+        tr.queue_item_id = 1
+        tr.track_id = tid_u32
+        aq = QConnectMessage()
+        aq.message_type = QConnectMessageType.MESSAGE_TYPE_CTRL_SRVR_QUEUE_ADD_TRACKS
+        aq.ctrl_srvr_queue_add_tracks.CopyFrom(add)
+        await self._send_qconnect_ctrl(aq)
+
+        await asyncio.sleep(0.25)
+        await self._send_ask_for_queue_state()
+        await asyncio.sleep(0.25)
+        if not self._queue_tracks or not self._queue_version:
+            _LOGGER.warning(
+                "Connect: play_track_now could not resolve queue for track_id=%s",
+                track_id,
+            )
+            return False
+        return await self._skip_to_queue_index(0)
+
+    async def set_shuffle_mode(self, shuffle_on: bool) -> None:
+        """Toggle shuffle via QConnect (requires current queue item + version)."""
+        if not self._connected or not self._queue_tracks or not self._queue_version:
+            _LOGGER.debug("Connect: shuffle — no queue context")
+            return
+        import qconnect_queue_pb2 as qq
+
+        from .generated import QConnectMessage, QConnectMessageType
+
+        idx = min(self.current_queue_index, len(self._queue_tracks) - 1)
+        item_id = int(self._queue_tracks[idx]["queue_item_id"])
+        sh = qq.CtrlSrvrSetShuffleMode()
+        sh.queue_version.major = self._queue_version["major"]
+        sh.queue_version.minor = self._queue_version["minor"]
+        sh.shuffle_on = shuffle_on
+        sh.current_queue_item_id = item_id & 0xFFFFFFFF
+        qmsg = QConnectMessage()
+        qmsg.message_type = QConnectMessageType.MESSAGE_TYPE_CTRL_SRVR_SET_SHUFFLE_MODE
+        qmsg.ctrl_srvr_set_shuffle_mode.CopyFrom(sh)
+        await self._send_qconnect_ctrl(qmsg)
+
+    async def set_loop_mode(self, loop_mode: int) -> None:
+        """Set repeat / loop mode (qconnect LoopMode enum value)."""
+        if not self._connected:
+            return
+        from .generated import (  # noqa: PLC0415
+            CtrlSrvrSetLoopMode,
+            QConnectMessage,
+            QConnectMessageType,
+        )
+
+        lm = CtrlSrvrSetLoopMode()
+        lm.mode = loop_mode
+        qmsg = QConnectMessage()
+        qmsg.message_type = QConnectMessageType.MESSAGE_TYPE_CTRL_SRVR_SET_LOOP_MODE
+        qmsg.ctrl_srvr_set_loop_mode.CopyFrom(lm)
+        await self._send_qconnect_ctrl(qmsg)
+
+    async def set_repeat_mode(self, mode: str) -> None:
+        """Map HA-style repeat string to LoopMode and send."""
+        from qconnect_common_pb2 import LoopMode  # noqa: PLC0415
+
+        key = (mode or "off").lower()
+        if "one" in key:
+            val = int(LoopMode.LOOP_MODE_REPEAT_ONE)
+        elif "all" in key:
+            val = int(LoopMode.LOOP_MODE_REPEAT_ALL)
+        else:
+            val = int(LoopMode.LOOP_MODE_OFF)
+        await self.set_loop_mode(val)
 
     async def discover_devices(self) -> list[dict[str, Any]]:
         """Return Connect devices seen on the WebSocket."""

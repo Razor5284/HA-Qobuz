@@ -85,7 +85,7 @@ class QobuzMediaPlayer(CoordinatorEntity[QobuzDataUpdateCoordinator], MediaPlaye
     def _on_connect_update(self, *_args: Any) -> None:
         """Connect pushed new devices or playback — refresh entity + coordinator."""
         self.schedule_update_ha_state()
-        self.hass.async_create_task(self.coordinator.async_request_refresh())
+        self.hass.async_create_task(self._coordinator_refresh_now())
 
     def _connect_client(self):  # noqa: ANN202
         if not self.hass:
@@ -95,6 +95,13 @@ class QobuzMediaPlayer(CoordinatorEntity[QobuzDataUpdateCoordinator], MediaPlaye
             .get(self._entry.entry_id, {})
             .get("connect_client")
         )
+
+    async def _coordinator_refresh_now(self) -> None:
+        """Pull REST + Connect state immediately (avoids debounced request_refresh)."""
+        try:
+            await self.coordinator.async_refresh()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Qobuz coordinator refresh failed: %s", err)
 
     # ------------------------------------------------------------------
     # Device info — groups entities under one device card
@@ -230,33 +237,46 @@ class QobuzMediaPlayer(CoordinatorEntity[QobuzDataUpdateCoordinator], MediaPlaye
         client = self._connect_client()
         if client and client.connected:
             await client.media_play()
-        await self.coordinator.async_request_refresh()
+        await self._coordinator_refresh_now()
 
     async def async_media_pause(self) -> None:
         client = self._connect_client()
         if client and client.connected:
             await client.media_pause()
-        await self.coordinator.async_request_refresh()
+        await self._coordinator_refresh_now()
 
     async def async_media_next_track(self) -> None:
         """Skip to the next track via Qobuz Connect."""
         client = self._connect_client()
         if client and client.connected:
             await client.media_next_track()
-        await self.coordinator.async_request_refresh()
+        await self._coordinator_refresh_now()
 
     async def async_media_previous_track(self) -> None:
         """Skip to the previous track via Qobuz Connect."""
         client = self._connect_client()
         if client and client.connected:
             await client.media_previous_track()
-        await self.coordinator.async_request_refresh()
+        await self._coordinator_refresh_now()
 
     async def async_set_shuffle(self, shuffle: bool) -> None:
-        _LOGGER.info("Qobuz shuffle: %s", shuffle)
+        client = self._connect_client()
+        if client and client.connected:
+            await client.set_shuffle_mode(shuffle)
+        await self._coordinator_refresh_now()
 
-    async def async_set_repeat(self, repeat: str) -> None:
-        _LOGGER.info("Qobuz repeat: %s", repeat)
+    async def async_set_repeat(self, repeat: Any) -> None:
+        raw = str(repeat).lower()
+        if "one" in raw:
+            mode = "one"
+        elif "all" in raw:
+            mode = "all"
+        else:
+            mode = "off"
+        client = self._connect_client()
+        if client and client.connected:
+            await client.set_repeat_mode(mode)
+        await self._coordinator_refresh_now()
 
     async def async_select_source(self, source: str) -> None:
         """Transfer playback to a Qobuz Connect renderer by display name."""
@@ -267,7 +287,7 @@ class QobuzMediaPlayer(CoordinatorEntity[QobuzDataUpdateCoordinator], MediaPlaye
             if dev.get("name") == source:
                 await client.transfer_playback(dev["id"])
                 break
-        await self.coordinator.async_request_refresh()
+        await self._coordinator_refresh_now()
 
     # ------------------------------------------------------------------
     # Play media
@@ -276,16 +296,20 @@ class QobuzMediaPlayer(CoordinatorEntity[QobuzDataUpdateCoordinator], MediaPlaye
     async def async_play_media(
         self, media_type: str, media_id: str, **kwargs: Any
     ) -> None:
-        """Play a media item.
-
-        For tracks, attempts to get a stream URL (requires app_secret).
-        If a stream URL is available it is passed to HA's media_player
-        service so a connected local player can receive it.  Without the
-        secret the track ID is logged as not-actionable.
-        """
+        """Play a track: prefer Qobuz Connect; otherwise stream URL if app_secret exists."""
         _LOGGER.info("Qobuz play_media: type=%s id=%s", media_type, media_id)
 
         if media_type in {MediaType.TRACK, "track"}:
+            client = self._connect_client()
+            if client and client.connected:
+                try:
+                    tid = int(str(media_id).rsplit(":", 1)[-1])
+                except ValueError:
+                    tid = 0
+                if tid > 0 and await client.play_track_now(tid):
+                    await self._coordinator_refresh_now()
+                    return
+
             url = await self.coordinator.api.get_track_url(media_id)
             if url:
                 _LOGGER.debug("Got stream URL for track %s — sending to HA", media_id)
@@ -301,12 +325,12 @@ class QobuzMediaPlayer(CoordinatorEntity[QobuzDataUpdateCoordinator], MediaPlaye
                 )
             else:
                 _LOGGER.info(
-                    "No stream URL available for track %s (app_secret not yet scraped); "
-                    "use the Qobuz app to start playback",
+                    "No Connect queue action and no stream URL for track %s "
+                    "(Connect disconnected or queue not ready; app_secret missing for URL)",
                     media_id,
                 )
 
-        await self.coordinator.async_request_refresh()
+        await self._coordinator_refresh_now()
 
     # ------------------------------------------------------------------
     # Browse media — full library tree

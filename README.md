@@ -44,7 +44,7 @@ When `/qws/createToken` succeeds, the integration opens a regional **QConnect We
 - **Transfer playback** to a device (media player → Source, or `qobuz.transfer_playback`)
 - **Play / Pause** via Connect when the WS session is connected (otherwise state still follows REST polling)
 
-**Next/previous** track skipping is not mapped yet (queue-level QConnect messages); use the Qobuz app or the device UI if needed.
+**Next/previous** track skipping uses QConnect **CtrlSrvrSetPlayerState** with the target queue item (queue must be synced from Connect).
 
 See [docs/adr/0001-qobuz-connect-approach.md](docs/adr/0001-qobuz-connect-approach.md) and [docs/adr/0002-phase3-qconnect-controller.md](docs/adr/0002-phase3-qconnect-controller.md).
 
@@ -61,6 +61,12 @@ Inspired by the excellent [SpotifyPlus](https://github.com/thlucas1/homeassistan
 ## Changelog
 
 See GitHub releases for detailed changes.
+
+**v0.11.4** — Connect playback UX (browse play, shuffle/repeat, devices):
+- **Browse → Play**: when Connect is connected, **play_media** clears the session queue (when a queue version exists), **QueueAddTracks** for the chosen track, then starts playback at index 0 (falls back to stream URL only if Connect is not ready)
+- **Shuffle / repeat**: wired to **CtrlSrvrSetShuffleMode** and **CtrlSrvrSetLoopMode**; media player uses an immediate **coordinator refresh** after transport so the UI tracks Connect faster than debounced `async_request_refresh`
+- **Next / previous**: no longer bumps the local queue index until the server sends **RendererStateUpdated** (avoids UI lying when the command is ignored while paused)
+- **Devices**: accept **ADD_RENDERER** without an embedded `DeviceInfo` payload; treat QConnect **max uint64** renderer id as “no active renderer” for **ACTIVE_RENDERER_CHANGED** and **RENDERER_STATE_UPDATED**; reset local renderer/queue cache on each new WebSocket session; **UPDATE_RENDERER** fallback match by display name + INFO log when unmatched (helps debug missing AVRs such as Denon)
 
 **v0.11.3** — Protobuf + Home Assistant event loop compatibility:
 - **Fix**: `DeviceInfo.capabilities` and nested QConnect payloads use **`CopyFrom`** — required with protobuf 5.x on newer HA/Python; the previous `info.capabilities = caps` assignment raised *Assignment not allowed to message field "capabilities"*, which aborted the Connect join on every attempt

@@ -419,6 +419,11 @@ async def test_connect_client_next_track(hass):
 
     result = await client.media_next_track()
     assert result is True
+    assert client.current_queue_index == 0
+    upd = _make_renderer_state_msg(
+        PlayingState.PLAYING_STATE_PLAYING, queue_index=1, renderer_id=1
+    )
+    client._handle_qmsg(upd)
     assert client.current_queue_index == 1
     client._ws.send.assert_called_once()
 
@@ -459,6 +464,11 @@ async def test_connect_client_previous_track(hass):
 
     result = await client.media_previous_track()
     assert result is True
+    assert client.current_queue_index == 2
+    upd = _make_renderer_state_msg(
+        PlayingState.PLAYING_STATE_PLAYING, queue_index=1, renderer_id=1
+    )
+    client._handle_qmsg(upd)
     assert client.current_queue_index == 1
     client._ws.send.assert_called_once()
 
