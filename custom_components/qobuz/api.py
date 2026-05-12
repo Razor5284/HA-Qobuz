@@ -327,8 +327,9 @@ class QobuzAPIClient:
           - ``endpoint``: WebSocket URL (e.g. regional ``wss://qws-…/ws``)
           - ``exp``: optional unix expiry seconds
 
-        The endpoint requires POST (not GET). Tries the standard
-        authenticated POST first, then falls back to GET if needed.
+        The endpoint expects **POST** with form field ``jwt`` (same string as
+        ``X-User-Auth-Token`` / browser ``localuser.token``) plus ``app_id``.
+        ``user_auth_token`` in the body alone returns HTTP 400 from Qobuz.
         """
         raw = await self._request_qws_token()
         return self._parse_qws_response(raw)
@@ -384,9 +385,11 @@ class QobuzAPIClient:
         url = f"{QOBUZ_API_BASE}/qws/createToken"
         timeout = ClientTimeout(total=15)
 
+        # Qobuz returns 400 "Missing argument: jwt" if only user_auth_token is sent;
+        # the web player POSTs form field ``jwt`` (same value as session / X-User-Auth-Token).
         post_attempts: list[tuple[str, dict[str, str]]] = [
-            ("user_auth_token", {"app_id": self._app_id, "user_auth_token": self._token}),
             ("jwt", {"app_id": self._app_id, "jwt": self._token}),
+            ("user_auth_token", {"app_id": self._app_id, "user_auth_token": self._token}),
         ] if self._token else [("app_id_only", {"app_id": self._app_id})]
 
         for label, form in post_attempts:
