@@ -20,6 +20,16 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 
+def _rest_playback_is_inactive(rest: dict[str, Any] | None) -> bool:
+    """True when REST /player/getState is missing or does not describe active media."""
+    if rest is None:
+        return True
+    if rest.get("is_playing") or rest.get("is_paused"):
+        return False
+    track = rest.get("track")
+    return not (isinstance(track, dict) and track)
+
+
 class QobuzDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Coordinator that polls Qobuz for library and playback state."""
 
@@ -52,11 +62,15 @@ class QobuzDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             # Core polls on every interval
             self.playlists = await self.api.get_playlists()
-            self.current_playback = await self.api.get_current_playback()
+            rest_playback = await self.api.get_current_playback()
+            self.current_playback = rest_playback
 
-            # If REST polling yielded no playback info, try Connect client state
-            if not self.current_playback and self.connect_client:
-                self.current_playback = await self._build_playback_from_connect()
+            # If REST is empty/idle (or None), merge Connect — avoids ``if not {}`` edge cases
+            # and accounts for 200 responses that omit real playback fields.
+            if _rest_playback_is_inactive(rest_playback) and self.connect_client:
+                connect_playback = await self._build_playback_from_connect()
+                if connect_playback:
+                    self.current_playback = connect_playback
 
             # User profile and favorites — fetched once per interval (cheap, cached by Qobuz)
             if not self.user_info:

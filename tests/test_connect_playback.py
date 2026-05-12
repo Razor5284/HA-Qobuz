@@ -20,7 +20,14 @@ def _make_connect_client(hass) -> QobuzConnectClient:
     return client
 
 
-def _make_renderer_state_msg(playing_state: int, position: int = 0, duration: int = 0, queue_index: int = 0):
+def _make_renderer_state_msg(
+    playing_state: int,
+    position: int = 0,
+    duration: int = 0,
+    queue_index: int = 0,
+    *,
+    renderer_id: int = 1,
+):
     """Build a mock QConnectMessage with srvr_ctrl_renderer_state_updated."""
     import qconnect_payload_pb2
 
@@ -31,7 +38,7 @@ def _make_renderer_state_msg(playing_state: int, position: int = 0, duration: in
     qmsg = qconnect_payload_pb2.QConnectMessage()
     qmsg.message_type = QConnectMessageType.MESSAGE_TYPE_SRVR_CTRL_RENDERER_STATE_UPDATED
     rsu = qmsg.srvr_ctrl_renderer_state_updated
-    rsu.renderer_id = 1
+    rsu.renderer_id = renderer_id
     rsu.message_id = 42
     state = rsu.state
     state.playing_state = playing_state
@@ -155,6 +162,63 @@ async def test_connect_client_session_state_updates_index(hass):
 
     assert client.current_queue_index == 2
     assert client.current_track_id == 30
+
+
+async def test_connect_client_ignores_state_from_inactive_renderer(hass):
+    """RendererStateUpdated for a non-active renderer must not clobber playback."""
+    from custom_components.qobuz.connect.generated import PlayingState
+
+    client = _make_connect_client(hass)
+    client._active_renderer_id = 2
+
+    wrong = _make_renderer_state_msg(
+        PlayingState.PLAYING_STATE_PLAYING,
+        queue_index=9,
+        renderer_id=1,
+    )
+    client._handle_qmsg(wrong)
+
+    assert client.is_playing is False
+    assert client.current_queue_index == 0
+
+    ok = _make_renderer_state_msg(
+        PlayingState.PLAYING_STATE_PLAYING,
+        queue_index=1,
+        renderer_id=2,
+    )
+    client._handle_qmsg(ok)
+
+    assert client.is_playing is True
+    assert client.current_queue_index == 1
+
+
+async def test_coordinator_prefers_connect_when_rest_is_empty_dict(hass, mock_api):
+    """A truthy but idle REST body must not block Connect playback."""
+    mock_api.get_current_playback = AsyncMock(return_value={})
+    mock_api.get_track_info = AsyncMock(return_value={
+        "id": 55,
+        "title": "From Connect",
+        "duration": 200,
+        "artist": {"name": "A"},
+        "album": {"title": "Al", "image": {}},
+    })
+
+    coordinator = QobuzDataUpdateCoordinator(hass, mock_api)
+    cc = MagicMock()
+    cc.connected = True
+    cc.is_playing = True
+    cc.is_paused = False
+    cc.playing_state = 2
+    cc.current_track_id = 55
+    cc.current_position = 1000
+    cc.active_device_name = "Web"
+    coordinator.connect_client = cc
+
+    await coordinator.async_refresh()
+
+    assert coordinator.current_playback is not None
+    assert coordinator.current_playback["track"]["title"] == "From Connect"
+    assert coordinator.current_playback["source"] == "connect"
 
 
 # ---------------------------------------------------------------------------

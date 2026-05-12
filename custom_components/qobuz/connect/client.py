@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-INTEGRATION_VERSION = "0.11.1"
+INTEGRATION_VERSION = "0.11.2"
 
 
 class QobuzConnectClient:
@@ -188,6 +188,7 @@ class QobuzConnectClient:
         elif mt == QConnectMessageType.MESSAGE_TYPE_SRVR_CTRL_RENDERER_STATE_UPDATED:
             rsu = qmsg.srvr_ctrl_renderer_state_updated
             if rsu and rsu.state:
+                rid: int | None = None
                 if rsu.HasField("renderer_id"):
                     rid = int(rsu.renderer_id)
                     if rid not in self._renderers:
@@ -196,14 +197,29 @@ class QobuzConnectClient:
                             "device_info": None,
                         }
                         self._sync_device_list()
-                self._apply_renderer_state(rsu.state)
-                _LOGGER.debug(
-                    "Connect: renderer state updated — playing_state=%s pos=%s dur=%s idx=%s",
-                    self.playing_state,
-                    self.current_position,
-                    self.duration,
-                    self.current_queue_index,
-                )
+                    if (
+                        self._active_renderer_id is not None
+                        and rid != self._active_renderer_id
+                    ):
+                        _LOGGER.debug(
+                            "Connect: ignoring renderer state from inactive renderer %s",
+                            rid,
+                        )
+                    else:
+                        self._apply_renderer_state(rsu.state)
+                        _LOGGER.debug(
+                            "Connect: renderer state updated — playing_state=%s pos=%s dur=%s idx=%s",
+                            self.playing_state,
+                            self.current_position,
+                            self.duration,
+                            self.current_queue_index,
+                        )
+                else:
+                    self._apply_renderer_state(rsu.state)
+                    _LOGGER.debug(
+                        "Connect: renderer state updated (no renderer_id) — playing_state=%s",
+                        self.playing_state,
+                    )
         elif mt == QConnectMessageType.MESSAGE_TYPE_SRVR_CTRL_SESSION_STATE:
             ss = qmsg.srvr_ctrl_session_state
             if ss:
@@ -239,11 +255,14 @@ class QobuzConnectClient:
 
     def _apply_renderer_state(self, state: Any) -> None:
         """Update local playback state from a RendererState protobuf."""
-        self.playing_state = int(state.playing_state) if state.playing_state else 0
-        if state.current_position:
+        if state.HasField("playing_state"):
+            self.playing_state = int(state.playing_state)
+        if state.current_position and state.current_position.HasField("value"):
             self.current_position = int(state.current_position.value)
-        self.duration = int(state.duration) if state.duration else 0
-        self.current_queue_index = int(state.current_queue_index) if state.current_queue_index else 0
+        if state.HasField("duration"):
+            self.duration = int(state.duration)
+        if state.HasField("current_queue_index"):
+            self.current_queue_index = int(state.current_queue_index)
         self._notify_entity_update()
 
     def _apply_queue_state(self, qs: Any) -> None:
