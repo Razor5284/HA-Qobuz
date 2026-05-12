@@ -94,6 +94,23 @@ class QobuzDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except QobuzAPIError as err:
             raise UpdateFailed(f"Error communicating with Qobuz API: {err}") from err
 
+    async def async_refresh_playback(self) -> None:
+        """Refresh only playback state (REST + Connect merge), without re-fetching library.
+
+        Used after Connect transport commands so the HA UI updates quickly.
+        """
+        try:
+            rest_playback = await self.api.get_current_playback()
+            merged = rest_playback
+            if _rest_playback_is_inactive(rest_playback) and self.connect_client:
+                connect_playback = await self._build_playback_from_connect()
+                if connect_playback:
+                    merged = connect_playback
+            self.current_playback = merged
+        except (QobuzAPIError, QobuzAuthError, Exception) as err:  # noqa: BLE001
+            _LOGGER.debug("Qobuz playback-only refresh failed: %s", err)
+        self.async_update_listeners()
+
     async def _build_playback_from_connect(self) -> dict[str, Any] | None:
         """Build a playback dict from Connect WebSocket state if active."""
         cc = self.connect_client

@@ -118,6 +118,28 @@ async def test_connect_client_queue_state(hass):
     assert client.queue_track_ids == [111, 222, 333]
 
 
+async def test_connect_client_queue_tracks_added_merges(hass):
+    """QUEUE_TRACKS_ADDED deltas must populate _queue_tracks (browse-to-play path)."""
+    import qconnect_payload_pb2 as qp
+
+    from custom_components.qobuz.connect.generated import QConnectMessageType
+
+    client = _make_connect_client(hass)
+    qmsg = qp.QConnectMessage()
+    qmsg.message_type = QConnectMessageType.MESSAGE_TYPE_SRVR_CTRL_QUEUE_TRACKS_ADDED
+    added = qmsg.srvr_ctrl_queue_tracks_added
+    added.queue_version.major = 3
+    added.queue_version.minor = 1
+    tr = added.tracks.add()
+    tr.queue_item_id = 9001
+    tr.track_id = 424242
+    client._handle_qmsg(qmsg)
+
+    assert client._queue_version == {"major": 3, "minor": 1}
+    assert client._queue_tracks == [{"queue_item_id": 9001, "track_id": 424242}]
+    assert client.queue_track_ids == [424242]
+
+
 async def test_connect_client_current_track_id(hass):
     """current_track_id should combine queue_track_ids and current_queue_index."""
     from custom_components.qobuz.connect.generated import PlayingState
@@ -219,6 +241,25 @@ async def test_coordinator_prefers_connect_when_rest_is_empty_dict(hass, mock_ap
     assert coordinator.current_playback is not None
     assert coordinator.current_playback["track"]["title"] == "From Connect"
     assert coordinator.current_playback["source"] == "connect"
+
+
+async def test_coordinator_async_refresh_playback_updates_playback(hass, mock_api):
+    """async_refresh_playback must not call full poll APIs like get_playlists."""
+    mock_api.get_current_playback = AsyncMock(
+        return_value={
+            "is_playing": True,
+            "is_paused": False,
+            "track": {"title": "REST only"},
+        }
+    )
+
+    coordinator = QobuzDataUpdateCoordinator(hass, mock_api)
+    coordinator.connect_client = None
+
+    await coordinator.async_refresh_playback()
+
+    mock_api.get_playlists.assert_not_called()
+    assert coordinator.current_playback["track"]["title"] == "REST only"
 
 
 # ---------------------------------------------------------------------------

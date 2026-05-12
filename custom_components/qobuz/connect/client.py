@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-INTEGRATION_VERSION = "0.11.4"
+INTEGRATION_VERSION = "0.11.6"
 
 # QConnect uses max uint64 as "no active renderer" in some server messages.
 RENDERER_ID_NO_ACTIVE = (1 << 64) - 1
@@ -69,6 +69,12 @@ class QobuzConnectClient:
         # Full queue state for track skipping
         self._queue_tracks: list[dict[str, Any]] = []  # [{queue_item_id, track_id}]
         self._queue_version: dict[str, int] | None = None  # {major, minor}
+        self._queue_action_uuid: bytes | None = None
+        self._queue_hash: bytes | None = None
+        self._shuffle_mode: bool | None = None
+        self._loop_mode: int | None = None
+        self._renderer_volumes: dict[int, float] = {}
+        self._max_audio_quality: int | None = None
 
     @property
     def connected(self) -> bool:
@@ -92,6 +98,28 @@ class QobuzConnectClient:
         from .generated import PlayingState  # noqa: PLC0415
 
         return self.playing_state == PlayingState.PLAYING_STATE_PAUSED
+
+    @property
+    def shuffle_mode(self) -> bool | None:
+        """Last known shuffle flag from queue snapshot or server ack (if any)."""
+        return self._shuffle_mode
+
+    @property
+    def loop_mode(self) -> int | None:
+        """Raw qconnect ``LoopMode`` enum value from server ack (if any)."""
+        return self._loop_mode
+
+    @property
+    def volume_level(self) -> float | None:
+        """Last known volume for the active renderer (0..1), from Connect."""
+        if self._active_renderer_id is None:
+            return None
+        return self._renderer_volumes.get(self._active_renderer_id)
+
+    @property
+    def connect_max_audio_quality(self) -> int | None:
+        """Last reported max streaming quality id from Connect (if any)."""
+        return self._max_audio_quality
 
     @property
     def current_track_id(self) -> int | None:
@@ -155,6 +183,12 @@ class QobuzConnectClient:
         self.queue_track_ids.clear()
         self._queue_tracks.clear()
         self._queue_version = None
+        self._queue_action_uuid = None
+        self._queue_hash = None
+        self._shuffle_mode = None
+        self._loop_mode = None
+        self._renderer_volumes.clear()
+        self._max_audio_quality = None
         self.playing_state = 0
         self.current_position = 0
         self.duration = 0
@@ -219,6 +253,7 @@ class QobuzConnectClient:
             if rem and rem.HasField("renderer_id"):
                 rid = int(rem.renderer_id)
                 self._renderers.pop(rid, None)
+                self._renderer_volumes.pop(rid, None)
                 if self._active_renderer_id == rid:
                     self._active_renderer_id = None
                 self._sync_device_list()
@@ -306,6 +341,66 @@ class QobuzConnectClient:
                 _LOGGER.debug(
                     "Connect: queue tracks loaded — %d tracks", len(self.queue_track_ids)
                 )
+        elif mt == QConnectMessageType.MESSAGE_TYPE_SRVR_CTRL_QUEUE_TRACKS_ADDED:
+            added = qmsg.srvr_ctrl_queue_tracks_added
+            if added:
+                self._apply_queue_tracks_added(added)
+                _LOGGER.debug(
+                    "Connect: queue tracks added — %d tracks (total %d)",
+                    len(added.tracks),
+                    len(self._queue_tracks),
+                )
+        elif mt == QConnectMessageType.MESSAGE_TYPE_SRVR_CTRL_QUEUE_CLEARED:
+            cleared = qmsg.srvr_ctrl_queue_cleared
+            if cleared and cleared.queue_version:
+                self._queue_version = {
+                    "major": int(cleared.queue_version.major),
+                    "minor": int(cleared.queue_version.minor),
+                }
+            self._queue_tracks.clear()
+            self.queue_track_ids.clear()
+            self._apply_queue_meta_from(cleared)
+            self._notify_entity_update()
+            _LOGGER.debug("Connect: queue cleared")
+        elif mt == QConnectMessageType.MESSAGE_TYPE_SRVR_CTRL_QUEUE_VERSION_CHANGED:
+            vc = qmsg.srvr_ctrl_queue_version_changed
+            if vc and vc.queue_version:
+                self._queue_version = {
+                    "major": int(vc.queue_version.major),
+                    "minor": int(vc.queue_version.minor),
+                }
+                self._notify_entity_update()
+                _LOGGER.debug("Connect: queue version changed")
+        elif mt == QConnectMessageType.MESSAGE_TYPE_SRVR_CTRL_SHUFFLE_MODE_SET:
+            sm = qmsg.srvr_ctrl_shuffle_mode_set
+            if sm:
+                if sm.HasField("shuffle_on"):
+                    self._shuffle_mode = bool(sm.shuffle_on)
+                self._apply_queue_meta_from(sm)
+                self._notify_entity_update()
+                _LOGGER.debug("Connect: shuffle mode set -> %s", self._shuffle_mode)
+        elif mt == QConnectMessageType.MESSAGE_TYPE_SRVR_CTRL_LOOP_MODE_SET:
+            lm = qmsg.srvr_ctrl_loop_mode_set
+            if lm and lm.HasField("mode"):
+                self._loop_mode = int(lm.mode)
+                self._notify_entity_update()
+                _LOGGER.debug("Connect: loop mode set -> %s", self._loop_mode)
+        elif mt == QConnectMessageType.MESSAGE_TYPE_SRVR_CTRL_VOLUME_CHANGED:
+            vol = qmsg.srvr_ctrl_volume_changed
+            if vol and vol.HasField("renderer_id") and vol.HasField("volume"):
+                rid = int(vol.renderer_id)
+                level = max(0.0, min(1.0, int(vol.volume) / 100.0))
+                self._renderer_volumes[rid] = level
+                self._notify_entity_update()
+                _LOGGER.debug("Connect: volume renderer=%s -> %.2f", rid, level)
+        elif mt == QConnectMessageType.MESSAGE_TYPE_SRVR_CTRL_MAX_AUDIO_QUALITY_CHANGED:
+            aq = qmsg.srvr_ctrl_max_audio_quality_changed
+            if aq and aq.HasField("max_audio_quality"):
+                self._max_audio_quality = int(aq.max_audio_quality)
+                self._notify_entity_update()
+                _LOGGER.debug(
+                    "Connect: max audio quality changed -> %s", self._max_audio_quality
+                )
         else:
             _LOGGER.debug("Connect: unhandled message type %s", mt)
 
@@ -321,6 +416,17 @@ class QobuzConnectClient:
             self.current_queue_index = int(state.current_queue_index)
         self._notify_entity_update()
 
+    def _apply_queue_meta_from(self, obj: Any) -> None:
+        """Store queue_hash / action_uuid when present (needed for shuffle and some writes)."""
+        if obj is None:
+            return
+        qh = getattr(obj, "queue_hash", None)
+        if qh:
+            self._queue_hash = bytes(qh)
+        au = getattr(obj, "action_uuid", None)
+        if au:
+            self._queue_action_uuid = bytes(au)
+
     def _apply_queue_state(self, qs: Any) -> None:
         """Update local queue track list from SrvrCtrlQueueState."""
         self.queue_track_ids = [int(t.track_id) for t in qs.tracks if t.track_id]
@@ -334,6 +440,9 @@ class QobuzConnectClient:
                 "major": int(qs.queue_version.major),
                 "minor": int(qs.queue_version.minor),
             }
+        self._apply_queue_meta_from(qs)
+        if qs.HasField("shuffle_mode"):
+            self._shuffle_mode = bool(qs.shuffle_mode)
         self._notify_entity_update()
 
     def _apply_queue_tracks_loaded(self, qtl: Any) -> None:
@@ -349,6 +458,29 @@ class QobuzConnectClient:
                 "major": int(qtl.queue_version.major),
                 "minor": int(qtl.queue_version.minor),
             }
+        self._apply_queue_meta_from(qtl)
+        self._notify_entity_update()
+
+    def _apply_queue_tracks_added(self, added: Any) -> None:
+        """Merge SrvrCtrlQueueTracksAdded (delta) into the local queue snapshot."""
+        if added.queue_version:
+            self._queue_version = {
+                "major": int(added.queue_version.major),
+                "minor": int(added.queue_version.minor),
+            }
+        self._apply_queue_meta_from(added)
+        existing_ids = {int(r["queue_item_id"]) for r in self._queue_tracks}
+        for t in added.tracks:
+            if not t.track_id:
+                continue
+            qid = int(t.queue_item_id)
+            if qid in existing_ids:
+                continue
+            self._queue_tracks.append(
+                {"queue_item_id": qid, "track_id": int(t.track_id)}
+            )
+            existing_ids.add(qid)
+        self.queue_track_ids = [int(r["track_id"]) for r in self._queue_tracks]
         self._notify_entity_update()
 
     async def _send_raw(self, data: bytes) -> None:
@@ -726,6 +858,8 @@ class QobuzConnectClient:
 
     async def play_track_now(self, track_id: int) -> bool:
         """Clear the session queue, add one track, and start playback at index 0."""
+        import time
+
         if not self._connected or self._ws is None or track_id <= 0:
             return False
         import qconnect_queue_pb2 as qq
@@ -733,6 +867,7 @@ class QobuzConnectClient:
         from .generated import QConnectMessage, QConnectMessageType
 
         tid_u32 = track_id & 0xFFFFFFFF
+        suggested_qid = (int(track_id) << 16) ^ tid_u32
 
         if self._queue_version is not None:
             clear = qq.CtrlSrvrClearQueue()
@@ -745,46 +880,66 @@ class QobuzConnectClient:
             self._queue_version = None
             self._queue_tracks.clear()
             self.queue_track_ids.clear()
+            self._queue_hash = None
+            self._queue_action_uuid = None
+            await asyncio.sleep(0.15)
 
         add = qq.CtrlSrvrQueueAddTracks()
         if self._queue_version is not None:
             add.queue_version.major = self._queue_version["major"]
             add.queue_version.minor = self._queue_version["minor"]
+        if self._queue_hash:
+            add.queue_hash = self._queue_hash
+        if self._queue_action_uuid:
+            add.action_uuid = self._queue_action_uuid
         tr = add.tracks.add()
-        tr.queue_item_id = 1
+        tr.queue_item_id = suggested_qid
         tr.track_id = tid_u32
         aq = QConnectMessage()
         aq.message_type = QConnectMessageType.MESSAGE_TYPE_CTRL_SRVR_QUEUE_ADD_TRACKS
         aq.ctrl_srvr_queue_add_tracks.CopyFrom(add)
         await self._send_qconnect_ctrl(aq)
 
-        await asyncio.sleep(0.25)
-        await self._send_ask_for_queue_state()
-        await asyncio.sleep(0.25)
-        if not self._queue_tracks or not self._queue_version:
-            _LOGGER.warning(
-                "Connect: play_track_now could not resolve queue for track_id=%s",
-                track_id,
-            )
-            return False
-        return await self._skip_to_queue_index(0)
+        deadline = time.monotonic() + 6.0
+        while time.monotonic() < deadline:
+            if not self._connected or self._ws is None:
+                _LOGGER.debug("Connect: play_track_now aborted (WebSocket closed)")
+                return False
+            if self._queue_tracks and self._queue_version:
+                return await self._skip_to_queue_index(0)
+            try:
+                await self._send_ask_for_queue_state()
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.debug("Connect: play_track_now ask_for_queue_state: %s", err)
+                return False
+            await asyncio.sleep(0.2)
+
+        _LOGGER.warning(
+            "Connect: play_track_now could not resolve queue for track_id=%s",
+            track_id,
+        )
+        return False
 
     async def set_shuffle_mode(self, shuffle_on: bool) -> None:
         """Toggle shuffle via QConnect (requires current queue item + version)."""
         if not self._connected or not self._queue_tracks or not self._queue_version:
             _LOGGER.debug("Connect: shuffle — no queue context")
             return
-        import qconnect_queue_pb2 as qq
+        import qconnect_payload_pb2 as qp
 
         from .generated import QConnectMessage, QConnectMessageType
 
         idx = min(self.current_queue_index, len(self._queue_tracks) - 1)
         item_id = int(self._queue_tracks[idx]["queue_item_id"])
-        sh = qq.CtrlSrvrSetShuffleMode()
+        sh = qp.CtrlSrvrSetShuffleMode()
         sh.queue_version.major = self._queue_version["major"]
         sh.queue_version.minor = self._queue_version["minor"]
         sh.shuffle_on = shuffle_on
         sh.current_queue_item_id = item_id & 0xFFFFFFFF
+        if self._queue_hash:
+            sh.queue_hash = self._queue_hash
+        if self._queue_action_uuid:
+            sh.action_uuid = self._queue_action_uuid
         qmsg = QConnectMessage()
         qmsg.message_type = QConnectMessageType.MESSAGE_TYPE_CTRL_SRVR_SET_SHUFFLE_MODE
         qmsg.ctrl_srvr_set_shuffle_mode.CopyFrom(sh)
@@ -794,13 +949,11 @@ class QobuzConnectClient:
         """Set repeat / loop mode (qconnect LoopMode enum value)."""
         if not self._connected:
             return
-        from .generated import (  # noqa: PLC0415
-            CtrlSrvrSetLoopMode,
-            QConnectMessage,
-            QConnectMessageType,
-        )
+        import qconnect_payload_pb2 as qp
 
-        lm = CtrlSrvrSetLoopMode()
+        from .generated import QConnectMessage, QConnectMessageType
+
+        lm = qp.CtrlSrvrSetLoopMode()
         lm.mode = loop_mode
         qmsg = QConnectMessage()
         qmsg.message_type = QConnectMessageType.MESSAGE_TYPE_CTRL_SRVR_SET_LOOP_MODE
@@ -819,6 +972,78 @@ class QobuzConnectClient:
         else:
             val = int(LoopMode.LOOP_MODE_OFF)
         await self.set_loop_mode(val)
+
+    async def media_seek(self, position_sec: float) -> bool:
+        """Seek current queue item to ``position_sec`` (Connect)."""
+        if not self._connected or not self._queue_tracks or not self._queue_version:
+            _LOGGER.debug("Connect: seek — no queue context")
+            return False
+        from .generated import (  # noqa: PLC0415
+            CtrlSrvrSetPlayerState,
+            QConnectMessage,
+            QConnectMessageType,
+        )
+
+        pos_ms = max(0, min(0xFFFFFFFF, int(float(position_sec) * 1000)))
+        idx = min(max(0, self.current_queue_index), len(self._queue_tracks) - 1)
+        target_item = self._queue_tracks[idx]
+        queue_item_id = int(target_item["queue_item_id"])
+
+        qmsg = QConnectMessage()
+        qmsg.message_type = QConnectMessageType.MESSAGE_TYPE_CTRL_SRVR_SET_PLAYER_STATE
+        ctrl = CtrlSrvrSetPlayerState()
+        ctrl.playing_state = self.playing_state
+        ctrl.current_position = pos_ms
+        qi = ctrl.current_queue_item
+        qi.id = queue_item_id & 0xFFFFFFFF
+        qv = qi.queue_version
+        qv.major = self._queue_version["major"]
+        qv.minor = self._queue_version["minor"]
+        qmsg.ctrl_srvr_set_player_state.CopyFrom(ctrl)
+        await self._send_qconnect_ctrl(qmsg)
+        self._notify_entity_update()
+        _LOGGER.debug("Connect: seek to %sms (queue item %s)", pos_ms, queue_item_id)
+        return True
+
+    async def set_volume_level(self, level: float) -> None:
+        """Set absolute volume on the active renderer (``level`` 0..1)."""
+        if not self._connected or self._active_renderer_id is None:
+            _LOGGER.debug("Connect: volume — no active renderer")
+            return
+        import qconnect_payload_pb2 as qp
+
+        from .generated import QConnectMessage, QConnectMessageType
+
+        rid = int(self._active_renderer_id)
+        if rid < -2147483648 or rid > 2147483647:
+            _LOGGER.warning(
+                "Connect: volume — renderer id %s does not fit int32; cannot send",
+                rid,
+            )
+            return
+        pct = max(0, min(100, int(round(float(level) * 100))))
+        ctrl = qp.CtrlSrvrSetVolume()
+        ctrl.renderer_id = rid
+        ctrl.volume = pct
+        qmsg = QConnectMessage()
+        qmsg.message_type = QConnectMessageType.MESSAGE_TYPE_CTRL_SRVR_SET_VOLUME
+        qmsg.ctrl_srvr_set_volume.CopyFrom(ctrl)
+        await self._send_qconnect_ctrl(qmsg)
+
+    async def set_max_streaming_quality(self, quality: int) -> None:
+        """Request a max streaming quality id via Connect (Qobuz quality scale)."""
+        if not self._connected:
+            return
+        import qconnect_payload_pb2 as qp
+
+        from .generated import QConnectMessage, QConnectMessageType
+
+        ctrl = qp.CtrlSrvrSetMaxAudioQuality()
+        ctrl.max_audio_quality = int(quality)
+        qmsg = QConnectMessage()
+        qmsg.message_type = QConnectMessageType.MESSAGE_TYPE_CTRL_SRVR_SET_MAX_AUDIO_QUALITY
+        qmsg.ctrl_srvr_set_max_audio_quality.CopyFrom(ctrl)
+        await self._send_qconnect_ctrl(qmsg)
 
     async def discover_devices(self) -> list[dict[str, Any]]:
         """Return Connect devices seen on the WebSocket."""
