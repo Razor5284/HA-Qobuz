@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import ssl
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -20,7 +21,12 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-INTEGRATION_VERSION = "0.11.2"
+INTEGRATION_VERSION = "0.11.3"
+
+
+def _default_ssl_context() -> ssl.SSLContext:
+    """Build TLS context (blocking cert store load — run in HA executor)."""
+    return ssl.create_default_context()
 
 
 class QobuzConnectClient:
@@ -343,15 +349,15 @@ class QobuzConnectClient:
         info.model = "Qobuz"
         # Web-style controller — matches typical browser / remote control clients
         info.type = DeviceType.DEVICE_TYPE_LAPTOP
-        info.capabilities = caps
+        info.capabilities.CopyFrom(caps)
         info.software_version = f"ha-qobuz-{INTEGRATION_VERSION}"
 
         join = CtrlSrvrJoinSession()
-        join.device_info = info
+        join.device_info.CopyFrom(info)
 
         qmsg = QConnectMessage()
         qmsg.message_type = QConnectMessageType.MESSAGE_TYPE_CTRL_SRVR_JOIN_SESSION
-        qmsg.ctrl_srvr_join_session = join
+        qmsg.ctrl_srvr_join_session.CopyFrom(join)
 
         now = protocol.now_ms()
         batch_mid = self._msg_id
@@ -377,7 +383,7 @@ class QobuzConnectClient:
 
         qmsg = QConnectMessage()
         qmsg.message_type = QConnectMessageType.MESSAGE_TYPE_CTRL_SRVR_ASK_FOR_RENDERER_STATE
-        qmsg.ctrl_srvr_ask_for_renderer_state = ask
+        qmsg.ctrl_srvr_ask_for_renderer_state.CopyFrom(ask)
 
         now = protocol.now_ms()
         batch_mid = self._msg_id
@@ -408,7 +414,7 @@ class QobuzConnectClient:
 
         qmsg = QConnectMessage()
         qmsg.message_type = QConnectMessageType.MESSAGE_TYPE_CTRL_SRVR_ASK_FOR_QUEUE_STATE
-        qmsg.ctrl_srvr_ask_for_queue_state = ask
+        qmsg.ctrl_srvr_ask_for_queue_state.CopyFrom(ask)
 
         now = protocol.now_ms()
         batch_mid = self._msg_id
@@ -443,7 +449,7 @@ class QobuzConnectClient:
             ctrl.playing_state = PlayingState.PLAYING_STATE_PLAYING
         else:
             ctrl.playing_state = PlayingState.PLAYING_STATE_STOPPED
-        qmsg.ctrl_srvr_set_player_state = ctrl
+        qmsg.ctrl_srvr_set_player_state.CopyFrom(ctrl)
 
         now = protocol.now_ms()
         batch_mid = self._msg_id
@@ -468,7 +474,7 @@ class QobuzConnectClient:
         qmsg.message_type = QConnectMessageType.MESSAGE_TYPE_CTRL_SRVR_SET_ACTIVE_RENDERER
         ctrl = CtrlSrvrSetActiveRenderer()
         ctrl.renderer_id = renderer_id
-        qmsg.ctrl_srvr_set_active_renderer = ctrl
+        qmsg.ctrl_srvr_set_active_renderer.CopyFrom(ctrl)
 
         now = protocol.now_ms()
         batch_mid = self._msg_id
@@ -606,18 +612,23 @@ class QobuzConnectClient:
         self._join_device_uuid = None
         self._pending_discovery_asks = False
 
-        try:
-            self._ws = await websockets.connect(
-                uri,
-                additional_headers={
-                    "Origin": "https://play.qobuz.com",
-                    "User-Agent": (
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-                    ),
-                },
-                max_size=None,
+        connect_kw: dict[str, Any] = {
+            "additional_headers": {
+                "Origin": "https://play.qobuz.com",
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                ),
+            },
+            "max_size": None,
+        }
+        if uri.lower().startswith("wss"):
+            connect_kw["ssl"] = await self.hass.async_add_executor_job(
+                _default_ssl_context
             )
+
+        try:
+            self._ws = await websockets.connect(uri, **connect_kw)
         except Exception as err:  # noqa: BLE001
             if self._consecutive_failures == 0:
                 _LOGGER.warning("Qobuz Connect WebSocket connection failed: %s", err)

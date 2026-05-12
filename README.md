@@ -62,6 +62,10 @@ Inspired by the excellent [SpotifyPlus](https://github.com/thlucas1/homeassistan
 
 See GitHub releases for detailed changes.
 
+**v0.11.3** — Protobuf + Home Assistant event loop compatibility:
+- **Fix**: `DeviceInfo.capabilities` and nested QConnect payloads use **`CopyFrom`** — required with protobuf 5.x on newer HA/Python; the previous `info.capabilities = caps` assignment raised *Assignment not allowed to message field "capabilities"*, which aborted the Connect join on every attempt
+- **Fix**: TLS default certificate store is built via **`async_add_executor_job`** before `websockets.connect`, avoiding *blocking call to load_default_certs* warnings on Python 3.14+
+
 **v0.11.2** — Connect discovery and HA now-playing sync:
 - **Fix**: `CtrlSrvrAskForQueueState` / `CtrlSrvrAskForRendererState` now send **queue_uuid** and **session_id** (from `SrvrCtrlSessionState`), matching [qonductor](https://github.com/nickblt/qonductor) — restores device list and queue/renderer snapshots when joining as a controller
 - **Fix**: `source_list` no longer treats an empty device list as missing; Connect updates trigger a **coordinator refresh** so track metadata updates without waiting for the poll interval
