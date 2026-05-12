@@ -62,6 +62,13 @@ Inspired by the excellent [SpotifyPlus](https://github.com/thlucas1/homeassistan
 
 See GitHub releases for detailed changes.
 
+**v0.11.2** — Connect discovery and HA now-playing sync:
+- **Fix**: `CtrlSrvrAskForQueueState` / `CtrlSrvrAskForRendererState` now send **queue_uuid** and **session_id** (from `SrvrCtrlSessionState`), matching [qonductor](https://github.com/nickblt/qonductor) — restores device list and queue/renderer snapshots when joining as a controller
+- **Fix**: `source_list` no longer treats an empty device list as missing; Connect updates trigger a **coordinator refresh** so track metadata updates without waiting for the poll interval
+- **Fix**: Coordinator merges Connect when REST returns an **idle but truthy** body (e.g. `{}`), not only `None`
+- **Improvement**: Ignore **RendererStateUpdated** from non-active renderers once the active renderer is known; apply **RendererState** fields only when set (partial protobuf updates)
+- **Improvement**: WebSocket **User-Agent**; join as **DEVICE_TYPE_LAPTOP**; handle **SrvrCtrlUpdateRenderer** and placeholder renderers before **AddRenderer**
+
 **v0.11.0** — Qobuz Connect token + HA playback fallback:
 - **Fix**: `/qws/createToken` matches the web player: POST form `jwt=jwt_qws` (literal) + `app_id`, session in `X-User-Auth-Token` only — restores Connect WebSocket for accounts that previously saw 400/503 on token creation
 - **Improvement**: Coordinator surfaces Connect metadata when renderer state is still `UNKNOWN` (after WS connect), and ignores explicit `STOPPED` so stale queue hints are not shown as now playing
