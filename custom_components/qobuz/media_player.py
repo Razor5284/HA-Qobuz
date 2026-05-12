@@ -12,6 +12,7 @@ from homeassistant.components.media_player import (
     MediaPlayerEntityFeature,
     MediaPlayerState,
     MediaType,
+    RepeatMode,
 )
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
@@ -44,6 +45,8 @@ SUPPORTED_FEATURES = (
     | MediaPlayerEntityFeature.SHUFFLE_SET
     | MediaPlayerEntityFeature.REPEAT_SET
     | MediaPlayerEntityFeature.SELECT_SOURCE
+    | MediaPlayerEntityFeature.SEEK
+    | MediaPlayerEntityFeature.VOLUME_SET
 )
 
 
@@ -97,9 +100,9 @@ class QobuzMediaPlayer(CoordinatorEntity[QobuzDataUpdateCoordinator], MediaPlaye
         )
 
     async def _coordinator_refresh_now(self) -> None:
-        """Pull REST + Connect state immediately (avoids debounced request_refresh)."""
+        """Refresh playback state immediately (avoids full library poll + debounce)."""
         try:
-            await self.coordinator.async_refresh()
+            await self.coordinator.async_refresh_playback()
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Qobuz coordinator refresh failed: %s", err)
 
@@ -179,7 +182,58 @@ class QobuzMediaPlayer(CoordinatorEntity[QobuzDataUpdateCoordinator], MediaPlaye
 
     @property
     def media_duration(self) -> int | None:
-        return (self.coordinator.current_playback or {}).get("track", {}).get("duration")
+        pb = self.coordinator.current_playback or {}
+        d = (pb.get("track") or {}).get("duration")
+        if d is not None:
+            return int(d)
+        client = self._connect_client()
+        if client and client.connected and client.duration:
+            return int(client.duration)
+        return None
+
+    @property
+    def media_position(self) -> int | None:
+        """Playback position in seconds (Connect sends milliseconds)."""
+        pb = self.coordinator.current_playback or {}
+        if "position" in pb:
+            return int(pb["position"]) // 1000
+        client = self._connect_client()
+        if client and client.connected:
+            return int(client.current_position) // 1000
+        return None
+
+    @property
+    def shuffle(self) -> bool | None:
+        """Shuffle state when Qobuz Connect reports it."""
+        client = self._connect_client()
+        if client and client.connected:
+            return client.shuffle_mode
+        return None
+
+    @property
+    def repeat(self) -> RepeatMode | None:
+        """Repeat mode from last Connect ``LoopMode`` ack (if known)."""
+        client = self._connect_client()
+        if not client or not client.connected or client.loop_mode is None:
+            return None
+        from qconnect_common_pb2 import LoopMode  # noqa: PLC0415
+
+        mode = int(client.loop_mode)
+        if mode == LoopMode.LOOP_MODE_REPEAT_ONE:
+            return RepeatMode.ONE
+        if mode == LoopMode.LOOP_MODE_REPEAT_ALL:
+            return RepeatMode.ALL
+        if mode == LoopMode.LOOP_MODE_OFF:
+            return RepeatMode.OFF
+        return None
+
+    @property
+    def volume_level(self) -> float | None:
+        """Volume for the active Connect renderer (0..1), when reported."""
+        client = self._connect_client()
+        if client and client.connected:
+            return client.volume_level
+        return None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -205,6 +259,8 @@ class QobuzMediaPlayer(CoordinatorEntity[QobuzDataUpdateCoordinator], MediaPlaye
         if cc:
             attrs["qobuz_connect_connected"] = cc.connected
             attrs["qobuz_connect_devices"] = len(cc.devices)
+            if cc.connect_max_audio_quality is not None:
+                attrs["connect_max_audio_quality"] = cc.connect_max_audio_quality
         return attrs
 
     # ------------------------------------------------------------------
@@ -259,6 +315,20 @@ class QobuzMediaPlayer(CoordinatorEntity[QobuzDataUpdateCoordinator], MediaPlaye
             await client.media_previous_track()
         await self._coordinator_refresh_now()
 
+    async def async_media_seek(self, position: float) -> None:
+        """Seek the active Connect session (position in seconds)."""
+        client = self._connect_client()
+        if client and client.connected:
+            await client.media_seek(position)
+        await self._coordinator_refresh_now()
+
+    async def async_set_volume_level(self, volume: float) -> None:
+        """Set volume on the active Connect renderer (0..1)."""
+        client = self._connect_client()
+        if client and client.connected:
+            await client.set_volume_level(volume)
+        await self._coordinator_refresh_now()
+
     async def async_set_shuffle(self, shuffle: bool) -> None:
         client = self._connect_client()
         if client and client.connected:
@@ -266,7 +336,8 @@ class QobuzMediaPlayer(CoordinatorEntity[QobuzDataUpdateCoordinator], MediaPlaye
         await self._coordinator_refresh_now()
 
     async def async_set_repeat(self, repeat: Any) -> None:
-        raw = str(repeat).lower()
+        val = getattr(repeat, "value", repeat)
+        raw = str(val).lower()
         if "one" in raw:
             mode = "one"
         elif "all" in raw:

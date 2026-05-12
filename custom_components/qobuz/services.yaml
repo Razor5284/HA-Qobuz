@@ -14,6 +14,31 @@ refresh_library:
       selector:
         text:
 
+set_streaming_quality:
+  name: Set streaming quality (Connect)
+  description: >-
+    Set the maximum streaming quality for the active Qobuz Connect session
+    (Qobuz format id, e.g. 6 = MP3 320, 7 = FLAC, 27 = Hi-Res). Requires an
+    active Connect WebSocket session.
+  fields:
+    quality:
+      name: Quality id
+      description: Qobuz max streaming quality id sent to Connect.
+      required: true
+      example: 7
+      selector:
+        number:
+          min: 5
+          max: 27
+          mode: box
+    config_entry:
+      name: Config Entry
+      description: Optional config entry ID. If omitted, the first Qobuz entry is used.
+      required: false
+      example: "abc123"
+      selector:
+        text:
+
 transfer_playback:
   name: Transfer Playback
   description: >-
