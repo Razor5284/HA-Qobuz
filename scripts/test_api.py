@@ -189,8 +189,8 @@ async def run(token: str, app_id: str | None) -> None:
             "Origin": "https://play.qobuz.com",
             "Referer": "https://play.qobuz.com/",
         }
-        # Same contract as the web player: ``jwt`` + ``app_id`` (not user_auth_token alone).
-        post_body = {"app_id": app_id, "jwt": token}
+        # Form field name is jwt_qws (not jwt); value = same session token as headers.
+        post_body = {"app_id": app_id, "jwt_qws": token}
         async with session.post(
             f"{QOBUZ_API_BASE}/qws/createToken",
             headers=ua_headers,
@@ -198,7 +198,10 @@ async def run(token: str, app_id: str | None) -> None:
             timeout=aiohttp.ClientTimeout(total=15),
         ) as resp:
             raw_ct = await resp.text()
-            print(f"      HTTP status: {resp.status} (POST body: app_id + jwt=<session token>)")
+            print(
+                f"      HTTP status: {resp.status} "
+                "(POST body: app_id + jwt_qws=<session token>)"
+            )
             if resp.status == 200:
                 try:
                     data_ct = json.loads(raw_ct)
